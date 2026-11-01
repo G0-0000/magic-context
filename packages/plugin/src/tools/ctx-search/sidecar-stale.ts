@@ -43,12 +43,16 @@ export function markSidecarStale(prefixPath: string, reason: string): void {
 export function readSidecarStale(prefixPath: string): SidecarStaleMarker | null {
     try {
         const parsed: unknown = JSON.parse(readFileSync(staleMarkerPathFor(prefixPath), "utf8"));
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+            return { reason: "invalid_marker", at: "" };
         const row = parsed as { reason?: unknown; at?: unknown };
-        if (typeof row.reason !== "string" || typeof row.at !== "string") return null;
+        if (typeof row.reason !== "string" || typeof row.at !== "string")
+            return { reason: "invalid_marker", at: "" };
         return { reason: row.reason, at: row.at };
-    } catch {
-        return null;
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? null
+            : { reason: "invalid_marker", at: "" };
     }
 }
 

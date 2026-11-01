@@ -3,7 +3,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
-import { insertMemory } from "../../features/magic-context/memory";
+import { computeNormalizedHash, insertMemory } from "../../features/magic-context/memory";
+import * as storageMemory from "../../features/magic-context/memory/storage-memory";
 import { supersededMemory } from "../../features/magic-context/memory/storage-memory";
 import { indexMessagesAfterOrdinal } from "../../features/magic-context/message-index";
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -22,7 +23,8 @@ import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import { resolveOpenCodeStrataAsk, STRATA_ASK_FOOTER, STRATA_ASK_T4 } from "./strata-ask";
+import { statusChangesPathFor } from "./flow-render";
+import { resolveOpenCodeStrataAsk, STRATA_ASK_FOOTER } from "./strata-ask";
 import { createCtxSearchTools } from "./tools";
 
 const toolContext = (sessionID = "ses-search", directory?: string) =>
@@ -758,7 +760,10 @@ describe("createCtxSearchTools", () => {
                 readMessages: () => [],
             });
             return String(
-                await tools.ctx_search.execute(sources ? { query, sources } : { query }, toolContext("ses-search", "/repo/project")),
+                await tools.ctx_search.execute(
+                    sources ? { query, sources } : { query },
+                    toolContext("ses-search", "/repo/project"),
+                ),
             );
         }
 
@@ -807,18 +812,33 @@ describe("createCtxSearchTools", () => {
         });
 
         it("pre-runs non-memory classic once, sends its materials and leaves prefix.json untouched on a bare hit", async () => {
-            const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([{
-                source: "message", content: "sqlite archive marker", score: 1,
-                messageOrdinal: 3, messageId: "m3", role: "user",
-            }]);
+            const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([
+                {
+                    source: "message",
+                    content: "sqlite archive marker",
+                    score: 1,
+                    messageOrdinal: 3,
+                    messageId: "m3",
+                    role: "user",
+                },
+            ]);
             let chatMessages: Array<{ role: string; content: string }> = [];
             const server = Bun.serve({
                 port: 0,
                 hostname: "127.0.0.1",
                 async fetch(req) {
-                    chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
+                    chatMessages = (
+                        (await req.json()) as { messages: Array<{ role: string; content: string }> }
+                    ).messages;
                     return Response.json({
-                        choices: [{ message: { content: "答案一行\n#1032：概括", reasoning_content: "skip" } }],
+                        choices: [
+                            {
+                                message: {
+                                    content: "答案一行\n#1032：概括",
+                                    reasoning_content: "skip",
+                                },
+                            },
+                        ],
                         session: { splice: { resume_ok: true } },
                     });
                 },
@@ -865,7 +885,9 @@ describe("createCtxSearchTools", () => {
                 port: 0,
                 hostname: "127.0.0.1",
                 async fetch(req) {
-                    chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
+                    chatMessages = (
+                        (await req.json()) as { messages: Array<{ role: string; content: string }> }
+                    ).messages;
                     return Response.json({ choices: [{ message: { content: "记忆库中无" } }] });
                 },
             });
@@ -895,7 +917,9 @@ describe("createCtxSearchTools", () => {
                 expect(result).toBe(baseline);
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
-                expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+                expect(chatMessages[0]?.content).toBe(
+                    `问题：${query}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。`,
+                );
             } finally {
                 spy.mockRestore();
                 server.stop(true);
@@ -904,7 +928,11 @@ describe("createCtxSearchTools", () => {
         });
 
         it("reuses the one non-memory classic result when Strata fails", async () => {
-            const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 404 }) });
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch: () => new Response(null, { status: 404 }),
+            });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
             const prefixPath = join(dir, "prefix.json");
             writeFileSync(prefixPath, prefix);
@@ -913,11 +941,23 @@ describe("createCtxSearchTools", () => {
                 const baseline = await classic([...fusionSources]);
                 spy.mockClear();
                 const tools = createCtxSearchTools({
-                    db, resolveProjectPath: () => "/repo/project", memoryEnabled: false,
-                    embeddingEnabled: false, readMessages: () => [],
-                    resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: false,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
                 });
-                expect(await tools.ctx_search.execute({ query }, toolContext("ses-search", "/repo/project"))).toBe(baseline);
+                expect(
+                    await tools.ctx_search.execute(
+                        { query },
+                        toolContext("ses-search", "/repo/project"),
+                    ),
+                ).toBe(baseline);
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
             } finally {
@@ -940,10 +980,16 @@ describe("createCtxSearchTools", () => {
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
             const prefixPath = join(dir, "prefix.json");
             writeFileSync(prefixPath, prefix);
-            const search = spyOn(searchModule, "unifiedSearch").mockResolvedValue([{
-                source: "message", content: "sqlite archive", score: 1,
-                messageOrdinal: 3, messageId: "m3", role: "user",
-            }]);
+            const search = spyOn(searchModule, "unifiedSearch").mockResolvedValue([
+                {
+                    source: "message",
+                    content: "sqlite archive",
+                    score: 1,
+                    messageOrdinal: 3,
+                    messageId: "m3",
+                    role: "user",
+                },
+            ]);
             const originalPrepare = db.prepare.bind(db);
             const prepare = spyOn(db, "prepare").mockImplementation((sql) => {
                 if (sql.includes("SELECT message_ordinal, message_time_ms")) {
@@ -956,14 +1002,79 @@ describe("createCtxSearchTools", () => {
                 const baseline = await classic([...fusionSources]);
                 search.mockClear();
                 const tools = createCtxSearchTools({
-                    db, resolveProjectPath: () => "/repo/project", memoryEnabled: false,
-                    embeddingEnabled: false, readMessages: () => [],
-                    resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: true,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
                 });
-                expect(await tools.ctx_search.execute({ query }, toolContext("ses-search", "/repo/project"))).toBe(baseline);
+                expect(
+                    await tools.ctx_search.execute(
+                        { query },
+                        toolContext("ses-search", "/repo/project"),
+                    ),
+                ).toBe(baseline);
                 expect(search).toHaveBeenCalledTimes(1);
+                search.mockImplementation(async (_db, _session, _project, _query, options) =>
+                    options?.sources
+                        ? [
+                              {
+                                  source: "message",
+                                  content: "sqlite archive",
+                                  score: 1,
+                                  messageOrdinal: 3,
+                                  messageId: "m3",
+                                  role: "user",
+                              },
+                          ]
+                        : [
+                              {
+                                  source: "memory",
+                                  content: "sqlite memory hit",
+                                  score: 1,
+                                  memoryId: 123,
+                                  category: "RESEARCH",
+                                  matchType: "fts",
+                              },
+                          ],
+                );
+                for (const marker of ["sidecar-stale", "pending-write"]) {
+                    const markerPath = `${prefixPath}.${marker}.json`;
+                    writeFileSync(
+                        markerPath,
+                        marker === "sidecar-stale"
+                            ? JSON.stringify({ reason: "skipped_recovery", at: "now" })
+                            : "{}",
+                    );
+                    search.mockClear();
+                    const result = await tools.ctx_search.execute(
+                        { query },
+                        toolContext("ses-search", "/repo/project"),
+                    );
+                    expect(result).toContain("sqlite memory hit");
+                    expect(search).toHaveBeenCalledTimes(2);
+                    expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
+                    rmSync(markerPath);
+                }
+                writeFileSync(statusChangesPathFor(prefixPath, "mc-mem-v1.bin"), '{"op":"rem');
+                search.mockClear();
+                expect(
+                    await tools.ctx_search.execute(
+                        { query },
+                        toolContext("ses-search", "/repo/project"),
+                    ),
+                ).toContain("sqlite memory hit");
+                expect(search).toHaveBeenCalledTimes(2);
+                expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
                 expect(calls).toBe(0);
-                expect(logged).toHaveBeenCalledWith("[ctx_search] transient-material fallback: side-query failed");
+                expect(logged).toHaveBeenCalledWith(
+                    "[ctx_search] transient-material fallback: side-query failed",
+                );
             } finally {
                 logged.mockRestore();
                 prepare.mockRestore();
@@ -975,25 +1086,43 @@ describe("createCtxSearchTools", () => {
 
         it("does not leak a matching memory into fusion's failed-search fallback", async () => {
             insertMemory(db, {
-                projectPath: "/repo/project", category: "RESEARCH",
+                projectPath: "/repo/project",
+                category: "RESEARCH",
                 content: "where is the sqlite path /secret/memory-only",
             });
-            const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 404 }) });
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch: () => new Response(null, { status: 404 }),
+            });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
             const prefixPath = join(dir, "prefix.json");
             writeFileSync(prefixPath, prefix);
             const common = {
-                db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
-                embeddingEnabled: false, readMessages: () => [],
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
             };
             const ctx = toolContext("ses-search", "/repo/project");
             try {
-                const baseline = await createCtxSearchTools(common).ctx_search.execute({ query, sources: [...fusionSources] }, ctx);
-                const classicAll = await createCtxSearchTools(common).ctx_search.execute({ query }, ctx);
+                const baseline = await createCtxSearchTools(common).ctx_search.execute(
+                    { query, sources: [...fusionSources] },
+                    ctx,
+                );
+                const classicAll = await createCtxSearchTools(common).ctx_search.execute(
+                    { query },
+                    ctx,
+                );
                 expect(classicAll).toContain("/secret/memory-only");
                 const fused = createCtxSearchTools({
                     ...common,
-                    resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
                 });
                 const result = await fused.ctx_search.execute({ query }, ctx);
                 expect(result).toBe(baseline);
@@ -1008,11 +1137,19 @@ describe("createCtxSearchTools", () => {
             let mode: "answered" | "miss" | "failed" = "answered";
             let chatMessages: Array<{ role: string; content: string }> = [];
             const server = Bun.serve({
-                port: 0, hostname: "127.0.0.1",
+                port: 0,
+                hostname: "127.0.0.1",
                 async fetch(req) {
                     if (mode === "failed") return new Response(null, { status: 404 });
-                    chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
-                    return Response.json({ choices: [{ message: { content: mode === "miss" ? "记忆库中无" : "记忆答案" } }], session: { restored: { tokens: 3 } } });
+                    chatMessages = (
+                        (await req.json()) as { messages: Array<{ role: string; content: string }> }
+                    ).messages;
+                    return Response.json({
+                        choices: [
+                            { message: { content: mode === "miss" ? "记忆库中无" : "记忆答案" } },
+                        ],
+                        session: { restored: { tokens: 3 } },
+                    });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
@@ -1020,9 +1157,16 @@ describe("createCtxSearchTools", () => {
             writeFileSync(prefixPath, prefix);
             const spy = spyOn(searchModule, "unifiedSearch");
             const tools = createCtxSearchTools({
-                db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
-                embeddingEnabled: false, readMessages: () => [],
-                resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
             });
             const ctx = toolContext("ses-search", "/repo/project");
             try {
@@ -1032,17 +1176,30 @@ describe("createCtxSearchTools", () => {
                     content: "where is the sqlite path /data/context.db",
                 });
                 const fallbackTool = createCtxSearchTools({
-                    db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
-                    embeddingEnabled: false, readMessages: () => [],
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: true,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
                 });
-                const baseline = await fallbackTool.ctx_search.execute({ query, sources: ["memory"] }, ctx);
+                const baseline = await fallbackTool.ctx_search.execute(
+                    { query, sources: ["memory"] },
+                    ctx,
+                );
                 spy.mockClear();
-                const answered = await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx);
+                const answered = await tools.ctx_search.execute(
+                    { query, sources: ["memory"] },
+                    ctx,
+                );
                 expect(answered).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
-                expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+                expect(chatMessages[0]?.content).toBe(
+                    `问题：${query}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。`,
+                );
                 mode = "miss";
-                expect(await tools.ctx_search.execute({ query, sources: ["memory", "memory"] }, ctx)).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
+                expect(
+                    await tools.ctx_search.execute({ query, sources: ["memory", "memory"] }, ctx),
+                ).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
                 mode = "failed";
                 const failed = await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx);
@@ -1057,14 +1214,405 @@ describe("createCtxSearchTools", () => {
             }
         });
 
+        it("carries the status document on both cache routes, with materials only on fusion", async () => {
+            const contents: string[] = [];
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    const body = (await req.json()) as { messages: Array<{ content: string }> };
+                    contents.push(body.messages[0]!.content);
+                    return Response.json({
+                        choices: [{ message: { content: "记忆答案" } }],
+                        session: { splice: { resume_ok: true } },
+                    });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            writeFileSync(
+                statusChangesPathFor(prefixPath, "mc-mem-v1.bin"),
+                `${JSON.stringify({ op: "remove", id: 42, kind: "archive", ts: "2026-11-01T00:00:00.000Z" })}\n`,
+            );
+            const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([
+                {
+                    source: "message",
+                    content: "sqlite archive marker",
+                    score: 1,
+                    messageOrdinal: 3,
+                    messageId: "m3",
+                    role: "user",
+                },
+            ]);
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
+            });
+            const ctx = toolContext("ses-search", "/repo/project");
+            const cancellation = "已删除/已归档，上文同号条目作废";
+            try {
+                // memory-only: the status document rides along, materials never do.
+                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(
+                    `记忆答案\n${STRATA_ASK_FOOTER}`,
+                );
+                expect(spy).toHaveBeenCalledTimes(0);
+                expect(contents[0]).toContain("【近期记忆变更】");
+                expect(contents[0]).toContain(`讣：#42 ${cancellation}`);
+                expect(contents[0]).not.toContain("【期外材料】");
+                // The status document is one block ahead of the question, and fusion
+                // carries that very same block.
+                const memoryOnly = contents[0]!;
+                const statusPrefix = memoryOnly.slice(0, memoryOnly.indexOf(`问题：${query}`));
+                expect(statusPrefix.startsWith("【近期记忆变更】")).toBe(true);
+                expect(statusPrefix.endsWith("\n\n")).toBe(true);
+                // fusion: status document, then materials, then the question.
+                expect(await tools.ctx_search.execute({ query }, ctx)).toBe(
+                    `记忆答案\n${STRATA_ASK_FOOTER}`,
+                );
+                expect(spy).toHaveBeenCalledTimes(1);
+                const fused = contents[1]!;
+                expect(fused.startsWith(statusPrefix)).toBe(true);
+                expect(fused.slice(statusPrefix.length).startsWith("【期外材料】")).toBe(true);
+                expect(fused).toContain("sqlite archive marker");
+                expect(fused.indexOf("【近期记忆变更】")).toBeLessThan(
+                    fused.indexOf("【期外材料】"),
+                );
+                expect(fused.indexOf("【期外材料】")).toBeLessThan(fused.indexOf(`问题：${query}`));
+                expect(readFileSync(prefixPath, "utf8")).toBe(prefix);
+            } finally {
+                spy.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("falls back to classic retrieval when the status document cannot be read", async () => {
+            let chatRequests = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    chatRequests++;
+                    return Response.json({ choices: [{ message: { content: "记忆答案" } }] });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            writeFileSync(
+                statusChangesPathFor(prefixPath, "mc-mem-v1.bin"),
+                `${JSON.stringify({ op: "add", id: 7, ts: "2026-11-01T00:00:00.000Z" })}\n`,
+            );
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "RESEARCH",
+                content: "where is the sqlite path statusfallbackmemory",
+            });
+            const lookup = spyOn(storageMemory, "getMemoriesByIds").mockImplementation(() => {
+                throw new Error("database unavailable");
+            });
+            const common = {
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+            };
+            const ctx = toolContext("ses-search", "/repo/project");
+            try {
+                const baseline = await createCtxSearchTools(common).ctx_search.execute(
+                    { query, sources: ["memory"] },
+                    ctx,
+                );
+                const classicAll = await createCtxSearchTools(common).ctx_search.execute(
+                    { query },
+                    ctx,
+                );
+                const routedTools = createCtxSearchTools({
+                    ...common,
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
+                });
+                const routed = await routedTools.ctx_search.execute(
+                    { query, sources: ["memory"] },
+                    ctx,
+                );
+                const fused = await routedTools.ctx_search.execute({ query }, ctx);
+                // An unavailable status must rerun the full classic search, not
+                // reuse the fusion route's non-memory materials.
+                expect(baseline).toContain(`id=${memory.id}`);
+                expect(routed).toBe(baseline);
+                expect(routed).toContain("statusfallbackmemory");
+                expect(classicAll).toContain("statusfallbackmemory");
+                expect(fused).toBe(classicAll);
+                expect(fused).toContain(`id=${memory.id}`);
+                expect(chatRequests).toBe(0);
+            } finally {
+                lookup.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("sends retained removals and corrections on both routes whether or not the slot contains the old entries", async () => {
+            const messages: string[] = [];
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    const body = (await req.json()) as { messages: Array<{ content: string }> };
+                    messages.push(body.messages[0]!.content);
+                    return Response.json({ choices: [{ message: { content: "记忆答案" } }] });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-retained-"));
+            const prefixPath = join(dir, "prefix.json");
+            const ledgerPath = statusChangesPathFor(prefixPath, "mc-mem-v1.bin");
+            const ctx = toolContext("ses-search", "/repo/project");
+            try {
+                const archived = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "RESEARCH",
+                    content: "where is sqlite archived old",
+                });
+                const updated = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "RESEARCH",
+                    content: "where is sqlite updated old",
+                });
+                storageMemory.updateMemoryStatus(db, archived.id, "archived");
+                const current = "where is sqlite updated new";
+                storageMemory.updateMemoryContent(
+                    db,
+                    updated.id,
+                    current,
+                    computeNormalizedHash(current),
+                );
+                const ts = "2026-01-01T00:00:00.000Z";
+                const row = (op: string, id: number) =>
+                    JSON.stringify({
+                        op,
+                        id,
+                        ts,
+                        ...(op === "remove" ? { kind: "archive" } : {}),
+                    });
+                const added = [row("add", archived.id), row("add", updated.id)];
+                const changed = [row("remove", archived.id), row("update", updated.id)];
+                const routed = createCtxSearchTools({
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: true,
+                    embeddingEnabled: false,
+                    readMessages: () => [],
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
+                });
+                const oldEntries = `#${archived.id} [RESEARCH] 〔${ts}〕：\n${archived.content}\n\n#${updated.id} [RESEARCH] 〔${ts}〕：\n${updated.content}`;
+                for (const [oldSlot, addRecordedLate] of [
+                    [oldEntries, false],
+                    [oldEntries, true],
+                    ["no memory entries", false],
+                    ["no memory entries", true],
+                ] as const) {
+                    const rows = addRecordedLate ? [...changed, ...added] : [...added, ...changed];
+                    writeFileSync(ledgerPath, `${rows.join("\n")}\n`);
+                    writeFileSync(
+                        prefixPath,
+                        JSON.stringify([
+                            { role: "system", content: "sys" },
+                            { role: "user", content: oldSlot },
+                            { role: "assistant", content: "ack" },
+                        ]),
+                    );
+                    const before = messages.length;
+                    expect(
+                        await routed.ctx_search.execute({ query, sources: ["memory"] }, ctx),
+                    ).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
+                    expect(await routed.ctx_search.execute({ query }, ctx)).toBe(
+                        `记忆答案\n${STRATA_ASK_FOOTER}`,
+                    );
+                    expect(messages).toHaveLength(before + 2);
+                    for (const message of messages.slice(before)) {
+                        expect(message).toContain(`讣：#${archived.id} 已删除/已归档`);
+                        expect(message).toContain(
+                            `正：#${updated.id} 已修改为：「${current}」，上文旧文作废`,
+                        );
+                        expect(message).not.toContain("增：");
+                    }
+                }
+            } finally {
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("falls back with real memories after a restored edit or a torn status ledger", async () => {
+            let chatRequests = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    chatRequests++;
+                    return Response.json({ choices: [{ message: { content: "stale answer" } }] });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
+            const prefixPath = join(dir, "prefix.json");
+            const ledgerPath = statusChangesPathFor(prefixPath, "mc-mem-v1.bin");
+            const common = {
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+            };
+            const ctx = toolContext("ses-search", "/repo/project");
+            const originalSearch = searchModule.unifiedSearch;
+            const search = spyOn(searchModule, "unifiedSearch").mockImplementation(
+                (database, session, project, text, options) =>
+                    originalSearch(database, session, project, text, {
+                        ...options,
+                        countRetrievals: false,
+                        measurementDisabled: true,
+                    }),
+            );
+            try {
+                const memory = insertMemory(db, {
+                    projectPath: "/repo/project",
+                    category: "RESEARCH",
+                    content: "where is the sqlite path stale_before_restore",
+                });
+                writeFileSync(
+                    prefixPath,
+                    JSON.stringify([
+                        { role: "system", content: "sys" },
+                        {
+                            role: "user",
+                            content: `#${memory.id} [RESEARCH] 〔${new Date(memory.updatedAt).toISOString()}〕：\n${memory.content}`,
+                        },
+                        { role: "assistant", content: "ack" },
+                    ]),
+                );
+                const ts = "2026-01-01T00:00:00.000Z";
+                storageMemory.updateMemoryStatus(db, memory.id, "archived");
+                const add = JSON.stringify({ op: "add", id: memory.id, ts });
+                const remove = JSON.stringify({ op: "remove", id: memory.id, kind: "archive", ts });
+                writeFileSync(ledgerPath, `${remove}\n`);
+                // Model the dashboard: it restores and edits the database and
+                // mutation log without appending an update to this slot's ledger.
+                storageMemory.updateMemoryStatus(db, memory.id, "active");
+                const content = "where is the sqlite path restorededitmemory";
+                storageMemory.updateMemoryContent(
+                    db,
+                    memory.id,
+                    content,
+                    computeNormalizedHash(content),
+                );
+                const mutation = queueMemoryMutation(db, {
+                    projectPath: "/repo/project",
+                    mutationType: "update",
+                    targetMemoryId: memory.id,
+                    newContent: content,
+                    queuedAt: Date.parse(ts) + 1000,
+                });
+                expect(mutation.queuedAt).toBeGreaterThan(Date.parse(ts));
+                expect(readFileSync(ledgerPath, "utf8")).toBe(`${remove}\n`);
+                expect(readFileSync(prefixPath, "utf8")).toContain("stale_before_restore");
+                const classic = createCtxSearchTools(common);
+                const baselineMemory = await classic.ctx_search.execute(
+                    { query, sources: ["memory"] },
+                    ctx,
+                );
+                const baselineAll = await classic.ctx_search.execute({ query }, ctx);
+                expect(baselineMemory).toContain(`id=${memory.id}`);
+                expect(baselineMemory).toContain("restorededitmemory");
+                expect(baselineAll).toContain("restorededitmemory");
+                const routed = createCtxSearchTools({
+                    ...common,
+                    resolveStrataAsk: () => ({
+                        ...connection,
+                        baseUrl: String(server.url).replace(/\/$/, ""),
+                        prefixPath,
+                    }),
+                });
+                // Do not rely on timestamps or mutation-log coverage: every live
+                // remove is uncertain, including a restore without a known edit.
+                const ledgers = [
+                    `${remove}\n`,
+                    `${JSON.stringify({ op: "update", id: memory.id, ts })}\n{"op":"rem`,
+                    `${add}\n${remove}\n`,
+                    `${remove}\n${add}\n`,
+                ];
+                for (const ledger of ledgers) {
+                    writeFileSync(ledgerPath, ledger);
+                    search.mockClear();
+                    const memoryOnly = await routed.ctx_search.execute(
+                        { query, sources: ["memory"] },
+                        ctx,
+                    );
+                    expect(memoryOnly).toBe(baselineMemory);
+                    expect(memoryOnly).not.toContain("讣");
+                    expect(search).toHaveBeenCalledTimes(1);
+                    expect(search.mock.calls[0]?.[4]?.sources).toEqual(["memory"]);
+                    search.mockClear();
+                    const fused = await routed.ctx_search.execute({ query }, ctx);
+                    expect(fused).toBe(baselineAll);
+                    expect(fused).not.toContain("讣");
+                    expect(search).toHaveBeenCalledTimes(2);
+                    expect(search.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                    expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
+                }
+                // The dashboard can also restore an edit for an ID absent from
+                // the slot. The retained remove still forces full fallback.
+                writeFileSync(
+                    prefixPath,
+                    JSON.stringify([
+                        { role: "system", content: "sys" },
+                        { role: "user", content: "no memory entries" },
+                        { role: "assistant", content: "ack" },
+                    ]),
+                );
+                writeFileSync(ledgerPath, `${add}\n${remove}\n`);
+                expect(await routed.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(
+                    baselineMemory,
+                );
+                expect(await routed.ctx_search.execute({ query }, ctx)).toBe(baselineAll);
+                expect(chatRequests).toBe(0);
+            } finally {
+                search.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
         it("accepts limit on cache-routed queries and keeps it on the classic materials", async () => {
             let chatMessages: Array<{ role: string; content: string }> = [];
             const server = Bun.serve({
                 port: 0,
                 hostname: "127.0.0.1",
                 async fetch(req) {
-                    chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
-                    return Response.json({ choices: [{ message: { content: "限额答案" } }], session: { splice: { resume_ok: true } } });
+                    chatMessages = (
+                        (await req.json()) as { messages: Array<{ role: string; content: string }> }
+                    ).messages;
+                    return Response.json({
+                        choices: [{ message: { content: "限额答案" } }],
+                        session: { splice: { resume_ok: true } },
+                    });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
@@ -1072,9 +1620,16 @@ describe("createCtxSearchTools", () => {
             writeFileSync(prefixPath, prefix);
             const spy = spyOn(searchModule, "unifiedSearch");
             const tools = createCtxSearchTools({
-                db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
-                embeddingEnabled: false, readMessages: () => [],
-                resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
             });
             const ctx = toolContext("ses-search", "/repo/project");
             try {
@@ -1084,10 +1639,15 @@ describe("createCtxSearchTools", () => {
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
                 expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
                 spy.mockClear();
-                const memoryOnly = await tools.ctx_search.execute({ query, sources: ["memory"], limit: 2 }, ctx);
+                const memoryOnly = await tools.ctx_search.execute(
+                    { query, sources: ["memory"], limit: 2 },
+                    ctx,
+                );
                 expect(memoryOnly).toBe(`限额答案\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
-                expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+                expect(chatMessages[0]?.content).toBe(
+                    `问题：${query}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。`,
+                );
             } finally {
                 spy.mockRestore();
                 server.stop(true);

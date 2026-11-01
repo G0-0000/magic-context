@@ -8,6 +8,17 @@
  * clobber slot 0 in between. The base tokens come from the server-side token
  * sidecar, not from a locally replayed prefix.
  *
+ * That one turn carries three things together: the status document (the memory
+ * changes the archived copy does not carry yet, read from the ledger beside
+ * `prefix_path`), the transient materials of the fusion route, and the question
+ * itself. The status document is rendered by flow-render.ts and stays inside
+ * the budget below; an absent or empty ledger renders the turn byte-identically
+ * to a query without it. A ledger that cannot be read completely — an IO error
+ * other than a missing file, a skipped line, a failed memory lookup, a live
+ * memory with a pending remove, or rows over the token cap — fails the query
+ * to classic retrieval instead: an incomplete status must never stand in for
+ * the archived copy.
+ *
  * This module never saves. The write side (strata-cache.ts) owns every save,
  * which is what keeps the sidecar in step with the prompt the cache answers
  * from. When the composite request reports that the sidecar cannot serve this
@@ -28,13 +39,26 @@
  * call. `timeout_ms` bounds the one composite request.
  */
 
+import { readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import PROMPTS from "./strata-prompts.json";
 import { loadPluginConfigDetailed } from "../../config";
-import { parseIdShapedQuery } from "../../features/magic-context/search";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
+import { getMemoriesByIds } from "../../features/magic-context/memory/storage-memory";
+import { parseIdShapedQuery } from "../../features/magic-context/search";
+import { openCurrentDatabase } from "../../features/magic-context/storage-db";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { log } from "../../shared/logger";
-import { markSidecarStale } from "./sidecar-stale";
+import type { Database } from "../../shared/sqlite";
+import {
+    parseStatusChanges,
+    renderStatusRow,
+    type StatusChange,
+    type StatusMemoryView,
+    statusChangesPathFor,
+} from "./flow-render";
+import { reduceLedgerRows } from "./ledger-reduce";
+import { markSidecarStale, readSidecarStale } from "./sidecar-stale";
+import PROMPTS from "./strata-prompts.json";
 
 /** Query template; copy lives in strata-prompts.json (edit there, rebuild dists). */
 export const STRATA_ASK_T4 = PROMPTS.t4;
@@ -42,6 +66,12 @@ export const STRATA_ASK_T4 = PROMPTS.t4;
 export const STRATA_ASK_MISS = "记忆库中无";
 export const DEFAULT_TRANSIENT_BUDGET_TOKENS = 2000;
 export const DEFAULT_CONTEXT_DOCS_BUDGET_TOKENS = 4000;
+/**
+ * Cap for the status document inside one query turn. It is priced apart from
+ * `DEFAULT_TRANSIENT_BUDGET_TOKENS`: this one bounds what the ledger may add to
+ * the spliced turn, that one bounds the fusion route's classic materials.
+ */
+export const DEFAULT_STATUS_BUDGET_TOKENS = 2000;
 
 export type StrataAskOutcome =
     | { status: "answered"; text: string }
@@ -138,7 +168,12 @@ export interface StrataAskConfigSource {
             slot_file?: string;
             prefix_path?: string;
             project?: string;
-            targets?: Array<{ project: string; slot_file: string; prefix_path: string; context_docs?: string[] }>;
+            targets?: Array<{
+                project: string;
+                slot_file: string;
+                prefix_path: string;
+                context_docs?: string[];
+            }>;
             context_docs?: string[];
             context_docs_budget_tokens?: number;
             max_tokens?: number;
@@ -198,7 +233,7 @@ export function strataAskConnectionFromConfig(
     config: StrataAskConfigSource,
 ): StrataAskConnection | null {
     const raw = config.memory?.strata_ask;
-    if (!raw || raw.enabled !== true) return null;
+    if (raw?.enabled !== true) return null;
     const baseUrl = nonEmpty(raw.base_url)?.replace(/\/+$/, "") ?? "";
     if (!/^https?:\/\//.test(baseUrl)) return null;
     const model = nonEmpty(raw.model);
@@ -241,16 +276,23 @@ export function strataAskConnectionFromConfig(
         project,
         maxTokens: Math.floor(maxTokens),
         timeoutMs: Math.floor(timeoutMs),
-        transientBudgetTokens: typeof raw.transient_budget_tokens === "number" &&
-            Number.isFinite(raw.transient_budget_tokens) && raw.transient_budget_tokens >= 1 &&
+        transientBudgetTokens:
+            typeof raw.transient_budget_tokens === "number" &&
+            Number.isFinite(raw.transient_budget_tokens) &&
+            raw.transient_budget_tokens >= 1 &&
             raw.transient_budget_tokens <= 8192
-            ? raw.transient_budget_tokens : DEFAULT_TRANSIENT_BUDGET_TOKENS,
+                ? raw.transient_budget_tokens
+                : DEFAULT_TRANSIENT_BUDGET_TOKENS,
         contextDocs: Array.isArray(raw.context_docs)
             ? raw.context_docs.filter((path) => typeof path === "string" && path.length > 0)
             : [],
-        contextDocsBudgetTokens: typeof contextDocsBudgetTokens === "number" &&
-            Number.isInteger(contextDocsBudgetTokens) && contextDocsBudgetTokens >= 1 && contextDocsBudgetTokens <= 32768
-            ? contextDocsBudgetTokens : DEFAULT_CONTEXT_DOCS_BUDGET_TOKENS,
+        contextDocsBudgetTokens:
+            typeof contextDocsBudgetTokens === "number" &&
+            Number.isInteger(contextDocsBudgetTokens) &&
+            contextDocsBudgetTokens >= 1 &&
+            contextDocsBudgetTokens <= 32768
+                ? contextDocsBudgetTokens
+                : DEFAULT_CONTEXT_DOCS_BUDGET_TOKENS,
     };
 }
 
@@ -260,18 +302,20 @@ export function strataAskConnectionForProject(
     projectIdentity: string | null | undefined,
 ): StrataAskConnection | null {
     const raw = config.memory?.strata_ask;
-    if (!raw || raw.enabled !== true || !projectIdentity) return null;
+    if (raw?.enabled !== true || !projectIdentity) return null;
     if (nonEmpty(raw.project) === projectIdentity) return strataAskConnectionFromConfig(config);
     const target = raw.targets?.find((entry) => nonEmpty(entry.project) === projectIdentity);
     if (!target) return null;
     return strataAskConnectionFromConfig({
-        memory: { strata_ask: {
-            ...raw,
-            project: target.project,
-            slot_file: target.slot_file,
-            prefix_path: target.prefix_path,
-            context_docs: target.context_docs ?? [],
-        } },
+        memory: {
+            strata_ask: {
+                ...raw,
+                project: target.project,
+                slot_file: target.slot_file,
+                prefix_path: target.prefix_path,
+                context_docs: target.context_docs ?? [],
+            },
+        },
     });
 }
 
@@ -281,7 +325,10 @@ export function resolveOpenCodeStrataAsk(directory: string): StrataAskConnection
     try {
         const loaded = loadPluginConfigDetailed(directory, false);
         if (isStrataConfigResolutionFailure(loaded.loadOutcome)) return null;
-        const project = resolveProjectIdentityForSession(directory, loaded.config.allow_home_project);
+        const project = resolveProjectIdentityForSession(
+            directory,
+            loaded.config.allow_home_project,
+        );
         return strataAskConnectionForProject(loaded.config, project);
     } catch {
         log("strata-ask disabled: resolution_failure");
@@ -289,17 +336,195 @@ export function resolveOpenCodeStrataAsk(directory: string): StrataAskConnection
     }
 }
 
-function renderT4(query: string): string {
-    const token = "{q}";
-    const at = STRATA_ASK_T4.indexOf(token);
-    return STRATA_ASK_T4.slice(0, at) + query + STRATA_ASK_T4.slice(at + token.length);
+/**
+ * One query turn: `status` is the rendered status document, `transient` the
+ * fusion route's classic materials. Both templates substitute an absent block
+ * with an empty string, so the turn stays byte-identical to the pre-block query
+ * whenever there is nothing to carry.
+ */
+export function renderQueryMessage(query: string, transient?: string, status?: string): string {
+    const template = transient ? PROMPTS.t4Fused : STRATA_ASK_T4;
+    return template.replace(/\{status\}|\{materials\}|\{q\}/g, (token) => {
+        if (token === "{status}") return status ?? "";
+        if (token === "{materials}") return transient ?? "";
+        return query;
+    });
 }
 
-function renderQueryMessage(query: string, transient?: string): string {
-    if (!transient) return renderT4(query);
-    return PROMPTS.t4Fused.replace(/\{materials\}|\{q\}/g, (token) =>
-        token === "{materials}" ? transient : query,
+export interface StrataStatusBlock {
+    text: string;
+    /** Rows carried in the block. */
+    kept: number;
+    /** Oldest rows the budget dropped. */
+    omitted: number;
+}
+
+/**
+ * Render the status document inside its token cap. The cap prices flow rows
+ * only — the rendered rows joined by `"\n\n"`, exactly the write side's
+ * measure (strata-cache.ts `estimateStatusTokens`) — so one ledger prices
+ * identically on both sides; the block header and truncation note are
+ * overhead neither side counts. Rows the current database voids (a vanished
+ * `add`, a `remove` whose memory was restored) render as null and drop out
+ * before measuring, on the same selection rule the write side applies. The
+ * query reader rejects live removes before building a block, because the slot
+ * may contain stale text. The newest rows are the point, so an over-budget
+ * ledger keeps them and drops the oldest, saying how many it dropped. A
+ * ledger with nothing renderable in it, or whose newest row alone does not
+ * fit, yields null: the cap is hard, and a block with no row in it says
+ * nothing worth sending.
+ */
+export function buildStrataStatusBlock(
+    changes: readonly StatusChange[],
+    memories: ReadonlyMap<number, StatusMemoryView>,
+    budgetTokens: number = DEFAULT_STATUS_BUDGET_TOKENS,
+): StrataStatusBlock | null {
+    const rows = reduceLedgerRows(changes, (change) => change)
+        .map((change) => renderStatusRow(change, memories.get(change.id) ?? null))
+        .filter((row): row is string => row !== null);
+    if (rows.length === 0) return null;
+    const compose = (start: number): string => {
+        const note =
+            start > 0 ? PROMPTS.statusTruncated.replace("{omitted}", () => String(start)) : null;
+        const body = [note, ...rows.slice(start)]
+            .filter((line): line is string => Boolean(line))
+            .join("\n");
+        return PROMPTS.statusBlock.replace("{rows}", () => body);
+    };
+    let newestFit = -1;
+    for (let start = rows.length - 1; start >= 0; start--) {
+        if (estimateTokens(rows.slice(start).join("\n\n")) > budgetTokens) break;
+        newestFit = start;
+    }
+    if (newestFit < 0) return null;
+    return { text: compose(newestFit), kept: rows.length - newestFit, omitted: newestFit };
+}
+
+/**
+ * The rows a status row may quote: this project's live memories, the same view
+ * the write side renders from. Anything else reads as a 讣 — the row cannot stand
+ * for current content. Returns null when the lookup could not run at all (no
+ * database handle, or the query threw): a failed lookup must never render a 讣,
+ * so the caller treats the whole status as unavailable. A lookup that ran and
+ * simply did not return an id confirms the memory is gone — that id renders as
+ * a 讣, which is the truth.
+ */
+function statusMemories(
+    connection: StrataAskConnection,
+    ids: readonly number[],
+    db?: Database,
+): Map<number, StatusMemoryView> | null {
+    const memories = new Map<number, StatusMemoryView>();
+    if (ids.length === 0) return memories;
+    let handle: Database | null;
+    try {
+        handle = db ?? openCurrentDatabase();
+    } catch (error) {
+        log("strata-ask: status memory lookup failed; classic retrieval answers this query", error);
+        return null;
+    }
+    if (!handle) {
+        log(
+            "strata-ask: no database handle for the status memory lookup; classic retrieval answers this query",
+        );
+        return null;
+    }
+    try {
+        for (const memory of getMemoriesByIds(handle, ids)) {
+            if (memory.projectPath !== connection.project) continue;
+            if (memory.status !== "active" && memory.status !== "permanent") continue;
+            memories.set(memory.id, memory);
+        }
+    } catch (error) {
+        log("strata-ask: status memory lookup failed; classic retrieval answers this query", error);
+        return null;
+    }
+    return memories;
+}
+
+/**
+ * The read result of one connection's status document. `ok: true` with a null
+ * text means there is nothing to carry — no ledger, an empty one, or nothing
+ * renderable in it — and the query proceeds without a block, byte-identically
+ * to a query without one. `ok: false` means the status is incomplete or cannot
+ * establish current content: an IO error other than a missing ledger, a skipped
+ * line, a failed memory lookup, a live remove, or rows over the token cap. The
+ * caller falls back to classic retrieval with memories.
+ */
+export type StrataStatusRead = { ok: true; text: string | null } | { ok: false };
+
+/** A caller-supplied status read, invoked inside the shared queue. */
+export type StrataStatusDocumentReader = () => StrataStatusRead;
+
+function isNotFoundError(error: unknown): boolean {
+    return (
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "ENOENT"
     );
+}
+
+/**
+ * The status document of one connection, rendered. `db` is the caller's live
+ * handle when it has one; without it the process's current database is read.
+ */
+export function readStrataStatusDocument(
+    connection: StrataAskConnection,
+    db?: Database,
+): StrataStatusRead {
+    let raw: string;
+    try {
+        raw = readFileSync(
+            statusChangesPathFor(connection.prefixPath, connection.slotFile),
+            "utf8",
+        );
+    } catch (error) {
+        // The steady state: the ledger was consumed, or never written.
+        if (isNotFoundError(error)) return { ok: true, text: null };
+        log("strata-ask: status ledger unreadable; classic retrieval answers this query", error);
+        return { ok: false };
+    }
+    try {
+        const parsed = parseStatusChanges(raw);
+        // Each non-empty line must yield exactly one row. The shared tolerant
+        // parser may skip malformed or torn lines, which could hide a change.
+        const nonEmptyLines = raw.split("\n").filter((line) => line.trim().length > 0).length;
+        if (parsed.length !== nonEmptyLines) {
+            log("strata-ask: status ledger has invalid rows; classic retrieval answers this query");
+            return { ok: false };
+        }
+        const changes = reduceLedgerRows(parsed, (change) => change);
+        if (changes.length === 0) return { ok: true, text: null };
+        const ids = [...new Set(changes.map((change) => change.id))];
+        const memories = statusMemories(connection, ids, db);
+        if (!memories) return { ok: false };
+        // A dashboard restore may also edit content without writing this ledger.
+        // Neither its timestamp nor a live status proves the slot is current,
+        // so every live remove fails closed without rendering a false 讣.
+        if (changes.some((change) => change.op === "remove" && memories.has(change.id))) {
+            log("strata-ask: status has a live remove; classic retrieval answers this query");
+            return { ok: false };
+        }
+        // A ledger whose rows all void against the current database (vanished
+        // adds) carries nothing. A cap breach instead fails the query.
+        const renderable = changes.filter(
+            (change) => renderStatusRow(change, memories.get(change.id) ?? null) !== null,
+        );
+        if (renderable.length === 0) return { ok: true, text: null };
+        const block = buildStrataStatusBlock(renderable, memories);
+        // An over-cap block is never sent truncated: the slot plus a partial
+        // status is not authoritative, so the query falls back instead.
+        if (!block || block.omitted > 0) {
+            log(
+                "strata-ask: status document over its token cap; classic retrieval answers this query",
+            );
+            return { ok: false };
+        }
+        return { ok: true, text: block.text };
+    } catch (error) {
+        log("strata-ask: status document unreadable; classic retrieval answers this query", error);
+        return { ok: false };
+    }
 }
 
 function isExactMiss(content: string): boolean {
@@ -322,11 +547,12 @@ function isExactMiss(content: string): boolean {
 }
 
 function fallback(reason: string): StrataAskOutcome {
-    const safe = /^(?:invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3}|splice_stale|splice_base_seam|splice_render_mismatch)$/.test(
-        reason,
-    )
-        ? reason
-        : "network_error";
+    const safe =
+        /^(?:invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3}|splice_stale|splice_base_seam|splice_render_mismatch|status_unavailable)$/.test(
+            reason,
+        )
+            ? reason
+            : "network_error";
     log(`strata-ask fallback: ${safe}`);
     return { status: "failed", reason: safe };
 }
@@ -342,7 +568,10 @@ let queue: Promise<void> = Promise.resolve();
  * held until the previous turn finishes, so this process never overlaps two
  * calls; other processes are kept apart by the server's per-request turn.
  */
-export function enqueue<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T | typeof ABORTED> {
+export function enqueue<T>(
+    work: () => Promise<T>,
+    signal?: AbortSignal,
+): Promise<T | typeof ABORTED> {
     const previous = queue;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -528,6 +757,8 @@ interface AskRequest {
     signal?: AbortSignal;
     fetchImpl: typeof fetch;
     transient?: string;
+    /** Rendered status document; absent when the ledger carries nothing. */
+    statusDocument?: string;
 }
 
 /** `choices[0].message.content` only; `reasoning_content` never reaches the answer. */
@@ -538,7 +769,8 @@ function outcomeOf(json: unknown): StrataAskOutcome {
     const message = (choices[0] as { message?: unknown } | null)?.message;
     if (!message || typeof message !== "object") return fallback("invalid_reply");
     const content = (message as { content?: unknown }).content;
-    if (typeof content !== "string" || content.trim().length === 0) return fallback("invalid_reply");
+    if (typeof content !== "string" || content.trim().length === 0)
+        return fallback("invalid_reply");
     if (isExactMiss(content)) return { status: "miss" };
     return { status: "answered", text: `${content.trimEnd()}\n${STRATA_ASK_FOOTER}` };
 }
@@ -550,7 +782,10 @@ function outcomeOf(json: unknown): StrataAskOutcome {
  * `model_busy` is a plain failure and marks nothing.
  */
 function spliceFailureOf(result: StrataPostFailure): string | null {
-    if (result.status === 409 && (result.errorType === "splice_stale" || result.errorType === "splice_base_seam")) {
+    if (
+        result.status === 409 &&
+        (result.errorType === "splice_stale" || result.errorType === "splice_base_seam")
+    ) {
         return result.errorType;
     }
     if (result.status === 400 && result.message?.startsWith("splice_render_mismatch")) {
@@ -563,13 +798,17 @@ function spliceFailureOf(result: StrataPostFailure): string | null {
 function logSessionObservations(json: unknown): void {
     const splice = sessionBlockOf(json)?.splice;
     if (splice?.resume_ok === false) {
-        log("strata-ask: splice resume missed; the base was recomputed this turn (answer unaffected)");
+        log(
+            "strata-ask: splice resume missed; the base was recomputed this turn (answer unaffected)",
+        );
     }
 }
 
 async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
     if (args.signal?.aborted) return fallback("aborted");
-    const apiKey = safeBearer(args.config.apiKey) ?? safeBearer(nonEmpty(process.env[args.config.apiKeyEnv ?? ""]));
+    const apiKey =
+        safeBearer(args.config.apiKey) ??
+        safeBearer(nonEmpty(process.env[args.config.apiKeyEnv ?? ""]));
     if (!apiKey) return fallback("missing_key");
     if (!/^https?:\/\//.test(args.config.baseUrl)) return fallback("invalid_endpoint");
 
@@ -578,7 +817,12 @@ async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
         body: {
             model: args.config.model,
             // Splice carries only the new turn: no system role, no replayed prefix.
-            messages: [{ role: "user", content: renderQueryMessage(args.query, args.transient) }],
+            messages: [
+                {
+                    role: "user",
+                    content: renderQueryMessage(args.query, args.transient, args.statusDocument),
+                },
+            ],
             max_tokens: args.config.maxTokens,
             stream: false,
             strata_session: { restore: args.config.slotFile, splice: true },
@@ -608,28 +852,68 @@ async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
     return outcomeOf(chat.json);
 }
 
+export function hasUnsafeStrataCache(prefixPath: string): boolean {
+    // Invalid or unreadable stale markers also mean the cache is unsafe.
+    if (readSidecarStale(prefixPath)) return true;
+    try {
+        statSync(`${prefixPath}.pending-write.json`);
+        return true;
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+}
+
 export async function tryStrataAskDetailed(args: {
     query: string;
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
     transient?: string;
+    /**
+     * How to obtain the rendered status document. A string is sent as-is; null
+     * sends the turn without one; a reader is invoked inside the shared queue,
+     * as close to the splice request as possible, so a consolidation queued
+     * ahead of this query writes the slot before the status freezes. Omitted
+     * reads the ledger for this connection (the default for every caller), also
+     * inside the queue. An unreadable or over-cap status fails the query to
+     * classic retrieval, like any other cache failure.
+     */
+    statusDocument?: string | null | StrataStatusDocumentReader;
 }): Promise<StrataAskOutcome> {
     const query = args.query.trim();
     if (!query) return fallback("invalid_reply");
     if (args.signal?.aborted) return fallback("aborted");
     try {
-        const result = await enqueue(
-            () =>
-                askOnce({
-                    query,
-                    transient: args.transient,
-                    config: args.config,
-                    signal: args.signal,
-                    fetchImpl: args.fetchImpl ?? fetch,
-                }),
-            args.signal,
-        );
+        const result = await enqueue(async () => {
+            // An unfinished save or stale sidecar cannot stand in for memories.
+            if (hasUnsafeStrataCache(args.config.prefixPath)) return fallback("status_unavailable");
+            // The status document is read here, inside the queue, immediately
+            // before the request: the read must observe every consolidation
+            // queued ahead of this query, or the query would answer the slot
+            // from a stale status and could overwrite the fresher content. An
+            // incomplete status is never sent truncated — it fails the query
+            // to classic retrieval instead.
+            let statusDocument: string | undefined;
+            if (typeof args.statusDocument === "function") {
+                const read = args.statusDocument();
+                if (!read.ok) return fallback("status_unavailable");
+                statusDocument = read.text ?? undefined;
+            } else if (args.statusDocument === undefined) {
+                const read = readStrataStatusDocument(args.config);
+                if (!read.ok) return fallback("status_unavailable");
+                statusDocument = read.text ?? undefined;
+            } else {
+                statusDocument = args.statusDocument ?? undefined;
+            }
+            return askOnce({
+                query,
+                transient: args.transient,
+                statusDocument,
+                config: args.config,
+                signal: args.signal,
+                fetchImpl: args.fetchImpl ?? fetch,
+            });
+        }, args.signal);
         if (result === ABORTED) return fallback("aborted");
         return result;
     } catch {
@@ -642,6 +926,7 @@ export async function tryStrataAsk(args: {
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
+    statusDocument?: string | null | StrataStatusDocumentReader;
 }): Promise<string | null> {
     const outcome = await tryStrataAskDetailed(args);
     return outcome.status === "answered" ? outcome.text : null;

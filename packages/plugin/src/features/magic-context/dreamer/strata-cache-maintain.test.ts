@@ -312,6 +312,45 @@ describe("strata-cache-maintain dream task", () => {
         expect(getDreamRuns(db, PROJECT)[0]?.tasks_json).toContain("daily-compaction");
     });
 
+    test("the consolidation task runs host-only through its own cache entry point", async () => {
+        db = freshDb();
+        spyOn(strataAsk, "resolveOpenCodeStrataAsk").mockReturnValue(CONNECTION);
+        const consolidate = spyOn(strataCache, "consolidateCache").mockResolvedValue({
+            action: "appended",
+            detail: "applied 2 change(s)",
+        });
+        const maintain = spyOn(strataCache, "maintainCache").mockResolvedValue({
+            action: "rebuilt",
+            detail: "unused",
+        });
+        const findParent = mock(async () => undefined);
+        const executor = createDreamTaskExecutor({
+            sessionDirectory: DIRECTORY,
+            openOpenCodeDb: () => null,
+            findParentSessionId: findParent,
+        });
+        const consolidateTask: DreamTaskRuntimeConfig = {
+            task: "strata-cache-consolidate",
+            schedule: "17 * * * *",
+            timeoutMinutes: 20,
+        };
+
+        const outcome = await runManualDream({
+            db,
+            projectIdentity: PROJECT,
+            tasks: [{ ...consolidateTask, modelChainUnavailable: true }],
+            executor,
+            task: consolidateTask.task,
+        });
+
+        expect(outcome.ran).toEqual([consolidateTask.task]);
+        expect(consolidate).toHaveBeenCalledTimes(1);
+        expect(consolidate).toHaveBeenCalledWith(DIRECTORY);
+        expect(maintain).not.toHaveBeenCalled();
+        expect(findParent).not.toHaveBeenCalled();
+        expect(getDreamRuns(db, PROJECT)[0]?.tasks_json).toContain("applied 2 change(s)");
+    });
+
     test("the executor rechecks eligibility before the call and preserves an opted-out due slot", async () => {
         db = freshDb();
         arm(db);

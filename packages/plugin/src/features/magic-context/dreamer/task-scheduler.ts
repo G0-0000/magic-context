@@ -29,6 +29,7 @@ import {
     type DreamTaskBacklogMap,
     type DreamTaskName,
     dreamTaskAllowedBySettings,
+    isStrataCacheDreamTask,
     leaseKeyFor,
     leaseKindFor,
 } from "./task-registry";
@@ -128,7 +129,7 @@ function strataCacheEnabledForTask(
     projectIdentity: string,
     probe?: TaskExecutor["strataCacheEnabled"],
 ): boolean {
-    if (task !== "strata-cache-maintain" || !probe) return false;
+    if (!isStrataCacheDreamTask(task) || !probe) return false;
     try {
         return probe(projectIdentity) === true;
     } catch {
@@ -144,7 +145,7 @@ function tasksAllowedBySettings(deps: RunDueTasksDeps): readonly DreamTaskRuntim
                 projectMemoryEnabled: deps.projectMemoryEnabled,
                 smartNotesEnabled: deps.smartNotesEnabled,
             }) &&
-            (config.task !== "strata-cache-maintain" ||
+            (!isStrataCacheDreamTask(config.task) ||
                 strataCacheEnabledForTask(
                     config.task,
                     deps.projectIdentity,
@@ -316,7 +317,7 @@ export function planDueTasks(
         // Disabling is local to this worktree, not a cancellation of shared work.
         if (config.schedule.trim() === "") continue;
         if (
-            config.task === "strata-cache-maintain" &&
+            isStrataCacheDreamTask(config.task) &&
             !strataCacheEnabledForTask(config.task, projectIdentity, strataCacheEnabled)
         )
             continue;
@@ -516,7 +517,7 @@ async function runDomainGroup(
                 });
                 if (!gatePass) {
                     // An opt-out in this checkout must not consume a shared due slot.
-                    if (due.config.task !== "strata-cache-maintain")
+                    if (!isStrataCacheDreamTask(due.config.task))
                         advanceAfterRun(db, projectIdentity, due, Date.now(), "skipped", null);
                     continue;
                 }
@@ -795,7 +796,7 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
         });
         if (pass) {
             gated.push(d);
-        } else if (d.config.task !== "strata-cache-maintain") {
+        } else if (!isStrataCacheDreamTask(d.config.task)) {
             advanceAfterRun(deps.db, deps.projectIdentity, d, now, "skipped", null);
         }
     }

@@ -88,4 +88,10 @@ export const TASKS: TaskMeta[] = [
     description: "Maintain the strata memory cache (daily compaction)",
     defaultSchedule: "30 8 * * *",
   },
+  {
+    name: "strata-cache-consolidate",
+    label: "Consolidate strata cache",
+    description: "Commit queued memory changes to the strata memory cache (hourly)",
+    defaultSchedule: "17 * * * *",
+  },
 ];

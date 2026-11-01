@@ -91,7 +91,7 @@ const insertMemoryStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoryByHashStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoryByIdStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoriesByIdsStatements = new Map<string, WeakMap<Database, PreparedStatement>>();
-const activeMemoriesNoExpiryStatements = new WeakMap<Database, PreparedStatement>();
+const activeMemoriesNoExpiryStatements = new Map<string, WeakMap<Database, PreparedStatement>>();
 const updateMemorySeenCountStatements = new WeakMap<Database, PreparedStatement>();
 const updateMemoryRetrievalCountStatements = new WeakMap<Database, PreparedStatement>();
 const updateMemoryStatusStatements = new WeakMap<Database, PreparedStatement>();
@@ -405,15 +405,26 @@ function getMemoriesByProjectStatement(db: Database, statuses: MemoryStatus[]): 
     return stmt;
 }
 
-/** All `active` rows for a project with NO expiry filter — for the destructive
- *  migration path only (see getAllActiveMemoriesForMigration). */
-function getActiveMemoriesNoExpiryStatement(db: Database): PreparedStatement {
-    let stmt = activeMemoriesNoExpiryStatements.get(db);
+/** Rows for a project in the given statuses with NO expiry filter — for the
+ *  destructive migration path and the strata cache snapshot (see
+ *  getAllActiveMemoriesForMigration). Cached per status set. */
+function getActiveMemoriesNoExpiryStatement(
+    db: Database,
+    statuses: MemoryStatus[],
+): PreparedStatement {
+    const key = statuses.join(",");
+    let statements = activeMemoriesNoExpiryStatements.get(key);
+    if (!statements) {
+        statements = new WeakMap<Database, PreparedStatement>();
+        activeMemoriesNoExpiryStatements.set(key, statements);
+    }
+    let stmt = statements.get(db);
     if (!stmt) {
+        const placeholders = statuses.map(() => "?").join(", ");
         stmt = db.prepare(
-            `SELECT ${getMemorySelectColumns(db)} FROM memories WHERE project_path = ? AND status = 'active' ORDER BY category ASC, updated_at DESC, id ASC`,
+            `SELECT ${getMemorySelectColumns(db)} FROM memories WHERE project_path = ? AND status IN (${placeholders}) ORDER BY category ASC, updated_at DESC, id ASC`,
         );
-        activeMemoriesNoExpiryStatements.set(db, stmt);
+        statements.set(db, stmt);
     }
     return stmt;
 }
@@ -977,8 +988,18 @@ export function readNewMemoriesForM1Union(
     return rows.map(toMemory);
 }
 
-export function getAllActiveMemoriesForMigration(db: Database, projectPath: string): Memory[] {
-    const rows = getActiveMemoriesNoExpiryStatement(db).all(projectPath).filter(isMemoryRow);
+/** All rows for a project in the given statuses with NO expiry filter. The
+ *  default preserves the original active-only migration semantics; the strata
+ *  cache passes ["active", "permanent"] to mirror the query side's effective
+ *  set (a merge can leave the new memory permanent). */
+export function getAllActiveMemoriesForMigration(
+    db: Database,
+    projectPath: string,
+    statuses: MemoryStatus[] = ["active"],
+): Memory[] {
+    const rows = getActiveMemoriesNoExpiryStatement(db, statuses)
+        .all(projectPath, ...statuses)
+        .filter(isMemoryRow);
     return rows.map(toMemory);
 }
 

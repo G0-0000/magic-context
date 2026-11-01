@@ -1,5 +1,5 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
-import { DREAMER_AGENT } from "../../agents/dreamer";
+import { DREAMER_AGENT, isDreamerCurateContext } from "../../agents/dreamer";
 import {
     curateCategoryForMemoryCategory,
     getActiveCurateCategory,
@@ -518,6 +518,12 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             const memoryVisibleToTool = (memory: Memory): boolean => visibility.visible(memory);
             const memoryOwnedByTool = (memory: Memory): boolean => visibility.owned(memory);
             const notifyMemoryChanged = (event: MemoryChangeEvent, identity: string) => {
+                // Dreamer (curate) writes stay out of the strata status document;
+                // the daily rebuild re-renders the cache from the DB. The memory
+                // write itself is unaffected — only the ledger registration is
+                // skipped. Keyed on the dreamer agent id, so regular subagents
+                // (scout, coder, explorer) keep recording their writes.
+                if (isDreamerCurateContext({ agent: toolContext.agent })) return;
                 if (identity !== projectPath) return;
                 try {
                     deps.onMemoryChanged?.(event, toolContext.directory);
