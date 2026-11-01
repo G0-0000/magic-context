@@ -30,6 +30,7 @@ import {
     withCacheLock,
 } from "./strata-cache";
 import PROMPTS from "./strata-prompts.json";
+import { markSidecarStale, readSidecarStale, staleMarkerPathFor } from "./sidecar-stale";
 
 const HEADER = "【项目参考文档】";
 const NOTICE = "本节为本项目参考文档，属记忆库之组成部分；非记忆条目，不计入记忆库条数。";
@@ -149,6 +150,8 @@ type TestMessage = { role: string; content: string };
 const SLOT_FILE = "test.bin";
 const PEER_SLOT_FILE = "peer.bin";
 
+type SaveFailureKind = "splice_stale" | "model_busy" | "save_error" | "skipped_recovery" | "no_session";
+
 type CacheFixture = {
     directory: string;
     prefixPath: string;
@@ -164,6 +167,7 @@ type CacheFixture = {
     lockSeenDuringCalls: boolean[];
     failNextChecks: (count: number) => void;
     failRestore: (status: number | null, times?: number) => void;
+    failSaves: (kind: SaveFailureKind, times?: number) => void;
 };
 
 /** Candidate files currently in a lock directory; empty when no one holds it. */
@@ -175,7 +179,12 @@ function lockCandidates(directory: string): string[] {
     }
 }
 
-/** A second slot in the same prefix directory, so isolation is observable. */
+/**
+ * A second slot in the same prefix directory, so isolation is observable.
+ * `docs` also decides maintenance's below-threshold gate: an empty list lets a
+ * small memory-only project skip cache creation entirely, so a test that expects
+ * `maintainCache` to create must keep the default non-empty list.
+ */
 async function withCacheFixture(run: (fixture: CacheFixture) => Promise<void>, docs = ["guide.md"]): Promise<void> {
     const root = createTestTempDirFromPath(join(tmpdir(), "mc-strata-cache-"));
     const directory = join(root, "project");
@@ -199,6 +208,7 @@ async function withCacheFixture(run: (fixture: CacheFixture) => Promise<void>, d
     process.env.XDG_DATA_HOME = dataHome;
     let failingChecks = 0;
     let restoreFailures: { status: number; remaining: number } | null = null;
+    let saveFailures: { kind: SaveFailureKind; remaining: number } | null = null;
     const countQuestions: string[] = [];
     const chatBodies: Array<Record<string, unknown>> = [];
     const calls: string[] = [];
@@ -209,21 +219,65 @@ async function withCacheFixture(run: (fixture: CacheFixture) => Promise<void>, d
         async fetch(request) {
             const url = new URL(request.url);
             const slotAction = url.searchParams.get("action");
-            calls.push(url.pathname === "/slots/0" ? (slotAction ?? "slot") : "chat");
             lockSeenDuringCalls.push(lockCandidates(lockDirectory).length > 0);
             if (url.pathname === "/slots/0") {
-                if (restoreFailures && slotAction === "restore" && restoreFailures.remaining > 0) {
+                calls.push(slotAction ?? "slot");
+                if (restoreFailures && restoreFailures.remaining > 0) {
                     restoreFailures.remaining--;
                     return new Response("restore rejected", { status: restoreFailures.status });
                 }
                 return Response.json({ n_restored: 1 });
             }
-            const body = await request.json() as Record<string, unknown> & { messages: TestMessage[] };
+            calls.push("chat");
+            const body = await request.json() as Record<string, unknown> & {
+                messages: TestMessage[];
+                strata_session?: { restore?: string; save?: string };
+            };
             chatBodies.push(body);
-            const messages = body.messages;
-            if (messages.length === 2) return Response.json({ choices: [{ message: { content: "已加载" } }] });
-            countQuestions.push(messages.at(-1)!.content);
-            const line = messages[1]!.content.split("\n").at(-1)!;
+            const session = body.strata_session;
+            // A restore rides either the bare probe or the composite write.
+            if (session?.restore && restoreFailures && restoreFailures.remaining > 0) {
+                restoreFailures.remaining--;
+                return new Response("session file: no such file", { status: restoreFailures.status });
+            }
+            if (session?.save) {
+                const failure = saveFailures;
+                if (failure && failure.remaining > 0) {
+                    failure.remaining--;
+                    if (failure.kind === "splice_stale" || failure.kind === "model_busy") {
+                        return Response.json(
+                            {
+                                error: {
+                                    type: failure.kind,
+                                    message: failure.kind === "splice_stale"
+                                        ? "another request saved the same name"
+                                        : "the model is busy",
+                                },
+                            },
+                            { status: 409 },
+                        );
+                    }
+                    if (failure.kind === "no_session") {
+                        return Response.json({ choices: [{ message: { content: "已加载" } }] });
+                    }
+                    if (failure.kind === "save_error") {
+                        return Response.json({
+                            choices: [{ message: { content: "已加载" } }],
+                            session: { save_error: { kind: "storage", reason: "disk full" } },
+                        });
+                    }
+                    return Response.json({
+                        choices: [{ message: { content: "已加载" } }],
+                        session: { sidecar: "skipped_recovery" },
+                    });
+                }
+                return Response.json({
+                    choices: [{ message: { content: "已加载" } }],
+                    session: { saved: { tokens: 3, bytes: 1024, ms: 1 } },
+                });
+            }
+            countQuestions.push(body.messages.at(-1)!.content);
+            const line = body.messages[1]!.content.split("\n").at(-1)!;
             const count = Number(/^本库共 (\d+) 条/.exec(line)![1]);
             const answer = failingChecks > 0 ? count + 1 : count;
             if (failingChecks > 0) failingChecks--;
@@ -260,6 +314,9 @@ async function withCacheFixture(run: (fixture: CacheFixture) => Promise<void>, d
             failRestore: (status, times = 1) => {
                 restoreFailures = status === null ? null : { status, remaining: times };
             },
+            failSaves: (kind, times = 1) => {
+                saveFailures = { kind, remaining: times };
+            },
         });
     } finally {
         server.stop(true);
@@ -278,6 +335,11 @@ function prefixUser(path: string): string {
 
 function writeChange(path: string, event: object): void {
     writeFileSync(path, `${JSON.stringify({ ...event, ts: "2026-10-30T00:00:00.000Z" })}\n`);
+}
+
+/** The `strata_session` of every chat this fixture saw, in order. */
+function chatSessions(bodies: Array<Record<string, unknown>>): unknown[] {
+    return bodies.map((body) => body.strata_session);
 }
 
 /** Pretend the previous maintenance finished long ago, so its cooldown is over. */
@@ -355,18 +417,20 @@ describe("rebuild and append", () => {
             for (const body of chatBodies) {
                 expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
                 // No other field appears, and the existing four keep their values.
-                const { model, messages, max_tokens, stream } = body;
+                const { model, messages, max_tokens, stream, strata_session } = body;
                 expect(body).toEqual({
                     model,
                     messages,
                     max_tokens,
                     stream,
+                    strata_session,
                     chat_template_kwargs: { enable_thinking: false },
                 });
                 expect(model).toBe("test-model");
                 expect(max_tokens).toBe(2048);
                 expect(stream).toBe(false);
                 expect(Array.isArray(messages)).toBe(true);
+                expect(strata_session).toBeDefined();
             }
         });
     });
@@ -428,6 +492,16 @@ describe("cache state paths", () => {
         }
     });
 
+    it("keeps the sidecar marker per prefix file beside it", () => {
+        const directory = join(tmpdir(), "mc-strata-slot");
+        expect(staleMarkerPathFor(join(directory, "prefix.json"))).toBe(
+            join(directory, "prefix.json.sidecar-stale.json"),
+        );
+        expect(staleMarkerPathFor(join(directory, "prefix-other.json"))).toBe(
+            join(directory, "prefix-other.json.sidecar-stale.json"),
+        );
+    });
+
     it("keeps one slot's pending events out of another slot's drain", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, peerPendingPath, project, db }) => {
             const memory = insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
@@ -446,45 +520,163 @@ describe("cache state paths", () => {
 });
 
 describe("remote slot lifecycle", () => {
-    it("restores the saved slot before the rebuild chat and saves before the self-check", async () => {
-        await withCacheFixture(async ({ directory, project, db, calls, lockSeenDuringCalls }) => {
+    it("writes the slot and its sidecar in one composite request and restores for the self-check", async () => {
+        await withCacheFixture(async ({ directory, project, db, calls, chatBodies, lockSeenDuringCalls }) => {
             insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
-            // Nothing saved yet: no slot to restore, so the rebuild starts with the chat.
-            expect(calls).toEqual(["chat", "save", "restore", "chat"]);
+            // Nothing published yet: the first build has no slot to restore.
+            expect(calls).toEqual(["chat", "chat"]);
+            expect(chatSessions(chatBodies)).toEqual([
+                { save: SLOT_FILE },
+                { restore: SLOT_FILE },
+            ]);
 
             calls.length = 0;
+            chatBodies.length = 0;
             lockSeenDuringCalls.length = 0;
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
-            expect(calls).toEqual(["restore", "chat", "save", "restore", "chat"]);
+            // The restore rides the write request; the self-check restores on its own.
+            expect(calls).toEqual(["chat", "chat"]);
+            expect(chatSessions(chatBodies)).toEqual([
+                { restore: SLOT_FILE, save: SLOT_FILE },
+                { restore: SLOT_FILE },
+            ]);
             expect(lockSeenDuringCalls.every(Boolean)).toBe(true);
         }, []);
     });
 
-    it("restores once per maintenance rebuild instead of twice", async () => {
-        await withCacheFixture(async ({ directory, project, db, calls }) => {
+    it("probes the slot once per maintenance rebuild and does not restore again for the write", async () => {
+        await withCacheFixture(async ({ directory, project, db, calls, chatBodies }) => {
             insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
             insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "second memory" });
             calls.length = 0;
+            chatBodies.length = 0;
             const maintained = await maintainCache(directory);
             expect(maintained.detail).toBe("daily-compaction");
-            expect(calls).toEqual(["restore", "chat", "save", "restore", "chat"]);
+            expect(calls).toEqual(["restore", "chat", "chat"]);
+            expect(chatSessions(chatBodies)).toEqual([
+                { save: SLOT_FILE },
+                { restore: SLOT_FILE },
+            ]);
         }, []);
     });
 
-    it("ignores a missing remote slot but aborts a rebuild on any other restore failure", async () => {
-        await withCacheFixture(async ({ directory, project, db, failRestore }) => {
+    it("ignores a missing slot on restore but aborts a rebuild on any other restore failure", async () => {
+        await withCacheFixture(async ({ directory, project, db, failRestore, chatBodies }) => {
             insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
-            // Only the reuse attempt sees 404; the slot really exists afterwards.
+            // The restore is a reuse attempt: 404 means there is nothing to reuse,
+            // so the same write is replayed without it instead of failing.
             failRestore(404);
+            chatBodies.length = 0;
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
+            expect(chatSessions(chatBodies)).toEqual([
+                { restore: SLOT_FILE, save: SLOT_FILE },
+                { save: SLOT_FILE },
+                { restore: SLOT_FILE },
+            ]);
             failRestore(500);
             expect((await rebuildCache(directory, "test")).action).toBe("error");
             failRestore(null);
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
         }, []);
+    });
+
+    it("fails the write and keeps pending events when the server reports save_error", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db, failSaves }) => {
+            const memory = insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            writeChange(pendingPath, { op: "add", id: memory.id });
+            const pending = readFileSync(pendingPath, "utf8");
+            failSaves("save_error");
+            expect((await rebuildCache(directory, "test")).action).toBe("error");
+            expect(existsSync(prefixPath)).toBe(false);
+            expect(readFileSync(pendingPath, "utf8")).toBe(pending);
+        }, []);
+    });
+
+    it("marks the sidecar stale when the server skips it after a reasoning-loop recovery", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, project, db, failSaves }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            failSaves("skipped_recovery");
+            expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
+            expect(readSidecarStale(prefixPath)).toMatchObject({ reason: "skipped_recovery" });
+        }, []);
+    });
+
+    it("retries the composite save once on a concurrent same-name conflict", async () => {
+        await withCacheFixture(async ({ directory, project, db, failSaves, chatBodies }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            failSaves("splice_stale");
+            expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
+            const saves = chatBodies.filter(
+                (body) => (body.strata_session as { save?: string } | undefined)?.save,
+            );
+            expect(saves).toHaveLength(2);
+            expect(saves[0]?.strata_session).toEqual(saves[1]?.strata_session);
+        }, []);
+    });
+
+    it("retries the composite save once on a 409 model_busy", async () => {
+        await withCacheFixture(async ({ directory, project, db, failSaves, chatBodies }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            failSaves("model_busy");
+            expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
+            const saves = chatBodies.filter(
+                (body) => (body.strata_session as { save?: string } | undefined)?.save,
+            );
+            expect(saves).toHaveLength(2);
+            expect(saves[0]?.strata_session).toEqual(saves[1]?.strata_session);
+        }, []);
+    });
+
+    it("fails the write on a persistent conflict and publishes nothing", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, project, db, failSaves }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            failSaves("splice_stale", 2);
+            expect((await rebuildCache(directory, "test")).action).toBe("error");
+            expect(existsSync(prefixPath)).toBe(false);
+        }, []);
+    });
+
+    it("forces a rebuild when the sidecar marker is present and clears it after the save", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, maintenancePath, project, db, calls }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            expect((await maintainCache(directory)).action).toBe("created");
+            markSidecarStale(prefixPath, "splice_stale");
+            ageMaintenance(maintenancePath);
+            calls.length = 0;
+            const maintained = await maintainCache(directory);
+            expect(maintained.detail).toBe("sidecar-stale");
+            expect(readSidecarStale(prefixPath)).toBeNull();
+            expect(calls).toEqual(["restore", "chat", "chat"]);
+        });
+    });
+
+    it("keeps the marker when the rebuild save skips the sidecar again", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, maintenancePath, project, db, failSaves }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            expect((await maintainCache(directory)).action).toBe("created");
+            markSidecarStale(prefixPath, "splice_stale");
+            ageMaintenance(maintenancePath);
+            failSaves("skipped_recovery");
+            expect((await maintainCache(directory)).detail).toBe("sidecar-stale");
+            expect(readSidecarStale(prefixPath)).toMatchObject({ reason: "skipped_recovery" });
+        });
+    });
+
+    it("keeps the sidecar marker when a save reply carries no session block", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, maintenancePath, project, db, failSaves }) => {
+            insertMemory(db, { projectPath: project, category: "OPS_RULES", content: "one memory" });
+            expect((await maintainCache(directory)).action).toBe("created");
+            markSidecarStale(prefixPath, "splice_stale");
+            ageMaintenance(maintenancePath);
+            failSaves("no_session");
+            // Nothing in the reply proves the sidecar was rewritten, so the marker
+            // has to survive for the next maintenance pass.
+            expect((await maintainCache(directory)).detail).toBe("sidecar-stale");
+            expect(readSidecarStale(prefixPath)).toMatchObject({ reason: "splice_stale" });
+        });
     });
 });
 
