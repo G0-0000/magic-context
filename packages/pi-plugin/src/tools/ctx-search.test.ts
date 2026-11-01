@@ -2,12 +2,19 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { insertMemory } from "@magic-context/core/features/magic-context/memory";
+import {
+	computeNormalizedHash,
+	insertMemory,
+	updateMemoryContent,
+	updateMemoryStatus,
+} from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
+import * as storageDb from "@magic-context/core/features/magic-context/storage-db";
 import * as logger from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { statusChangesPathFor } from "@magic-context/core/tools/ctx-search/flow-render";
 import { STRATA_ASK_FOOTER, STRATA_ASK_T4 } from "@magic-context/core/tools/ctx-search/strata-ask";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxSearchTool, resolvePiStrataAsk } from "./ctx-search";
@@ -507,7 +514,7 @@ describe("createCtxSearchTool", () => {
 			mode = "hit";
 			expect(await invoke({ query, sources: ["memory"] })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(0);
-			expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{q}", query));
+			expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{status}", "").replace("{q}", query));
 			mode = "miss";
 			expect(await invoke({ query, sources: ["memory", "memory"] })).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(0);
@@ -538,6 +545,234 @@ describe("createCtxSearchTool", () => {
 		}
 	});
 
+	it("sends retained removals and corrections on both routes whether or not the slot contains the old entries", async () => {
+		const db = createTestDb();
+		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-retained-"));
+		const prefixPath = join(prefixDir, "prefix.json");
+		const ledgerPath = statusChangesPathFor(prefixPath, "mc-mem-v1.bin");
+		const messages: string[] = [];
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			async fetch(req) {
+				const body = (await req.json()) as { messages: Array<{ content: string }> };
+				messages.push(body.messages[0]!.content);
+				return Response.json({ choices: [{ message: { content: "记忆答案" } }] });
+			},
+		});
+		const currentDb = spyOn(storageDb, "openCurrentDatabase").mockReturnValue(db);
+		try {
+			const project = "git:pi-retained";
+			const archived = insertMemory(db, {
+				projectPath: project, category: "RESEARCH", content: "where is sqlite archived old",
+			});
+			const updated = insertMemory(db, {
+				projectPath: project, category: "RESEARCH", content: "where is sqlite updated old",
+			});
+			updateMemoryStatus(db, archived.id, "archived");
+			const current = "where is sqlite updated new";
+			updateMemoryContent(db, updated.id, current, computeNormalizedHash(current));
+			const ts = "2026-01-01T00:00:00.000Z";
+			const row = (op: string, id: number) => JSON.stringify({
+				op, id, ts, ...(op === "remove" ? { kind: "archive" } : {}),
+			});
+			const added = [row("add", archived.id), row("add", updated.id)];
+			const changed = [row("remove", archived.id), row("update", updated.id)];
+			const routed = createCtxSearchTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				resolveProjectIdentity: () => project,
+				resolveStrataAsk: () => ({
+					baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "pi-strata-key", apiKeyEnv: null,
+					model: "qwen-test", slotFile: "mc-mem-v1.bin", prefixPath, project,
+					maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
+					contextDocs: [], contextDocsBudgetTokens: 4000,
+				}),
+			});
+			const ctx = fakeContext("ses-search", "/repo/pi-retained") as never;
+			const query = "where is sqlite";
+			const oldEntries = `#${archived.id} [RESEARCH] 〔${ts}〕：\n${archived.content}\n\n#${updated.id} [RESEARCH] 〔${ts}〕：\n${updated.content}`;
+			for (const [oldSlot, addRecordedLate] of [
+				[oldEntries, false], [oldEntries, true],
+				["no memory entries", false], ["no memory entries", true],
+			] as const) {
+				const rows = addRecordedLate ? [...changed, ...added] : [...added, ...changed];
+				writeFileSync(ledgerPath, `${rows.join("\n")}\n`);
+				writeFileSync(prefixPath, JSON.stringify([
+					{ role: "system", content: "sys" },
+					{ role: "user", content: oldSlot },
+					{ role: "assistant", content: "ack" },
+				]));
+				const before = messages.length;
+				for (const params of [{ query, sources: ["memory"] as Array<"memory"> }, { query }]) {
+					const result = await routed.execute("retained", params, new AbortController().signal, undefined, ctx);
+					expect(result.content[0]?.text).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
+				}
+				expect(messages).toHaveLength(before + 2);
+				for (const message of messages.slice(before)) {
+					expect(message).toContain(`讣：#${archived.id} 已删除/已归档`);
+					expect(message).toContain(`正：#${updated.id} 已修改为：「${current}」，上文旧文作废`);
+					expect(message).not.toContain("增：");
+				}
+			}
+		} finally {
+			currentDb.mockRestore();
+			server.stop(true);
+			rmSync(prefixDir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("falls back with real Pi memory hits for torn ledgers and restored edits", async () => {
+		const db = createTestDb();
+		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-status-"));
+		const prefixPath = join(prefixDir, "prefix.json");
+		const ledgerPath = statusChangesPathFor(prefixPath, "mc-mem-v1.bin");
+		let calls = 0;
+		let status = 409;
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			fetch() {
+				calls++;
+				return status === 409
+					? Response.json({ error: { type: "splice_stale" } }, { status })
+					: Response.json({ error: { message: "splice_render_mismatch" } }, { status });
+			},
+		});
+		const originalSearch = searchModule.unifiedSearch;
+		const search = spyOn(searchModule, "unifiedSearch").mockImplementation(
+			(database, session, project, text, options) =>
+				originalSearch(database, session, project, text, {
+					...options,
+					countRetrievals: false,
+					measurementDisabled: true,
+				}),
+		);
+		// Pi uses openCurrentDatabase for status reads. Supply the actual test
+		// store at that seam; memory lookup and classic search remain real.
+		const currentDb = spyOn(storageDb, "openCurrentDatabase").mockReturnValue(db);
+		const common = {
+			db,
+			memoryEnabled: true,
+			embeddingEnabled: false,
+			resolveProjectIdentity: () => "git:pi-status",
+		};
+		const ctx = fakeContext("ses-search", "/repo/pi-status") as never;
+		const query = "where is sqlite";
+		const invoke = async (
+			tool: ReturnType<typeof createCtxSearchTool>,
+			sources?: Array<"memory" | "message" | "git_commit" | "primer" | "note">,
+		) => {
+			const result = await tool.execute(
+				"status-fallback",
+				sources ? { query, sources } : { query },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			return result.content[0]?.text ?? "";
+		};
+		try {
+			const memory = insertMemory(db, {
+				projectPath: "git:pi-status",
+				category: "RESEARCH",
+				content: "where is sqlite stale_before_restore",
+			});
+			writeFileSync(prefixPath, JSON.stringify([
+				{ role: "system", content: "sys" },
+				{ role: "user", content: `#${memory.id} [RESEARCH] 〔${new Date(memory.updatedAt).toISOString()}〕：\n${memory.content}` },
+				{ role: "assistant", content: "ack" },
+			]));
+			const ts = "2026-01-01T00:00:00.000Z";
+			updateMemoryStatus(db, memory.id, "archived");
+			const add = JSON.stringify({ op: "add", id: memory.id, ts });
+			const remove = JSON.stringify({ op: "remove", id: memory.id, kind: "archive", ts });
+			writeFileSync(ledgerPath, `${remove}\n`);
+			updateMemoryStatus(db, memory.id, "active");
+			const content = "where is sqlite pirestorededit";
+			updateMemoryContent(db, memory.id, content, computeNormalizedHash(content));
+			const classic = createCtxSearchTool(common);
+			const baselineMemory = await invoke(classic, ["memory"]);
+			const baselineAll = await invoke(classic);
+			expect(baselineMemory).toContain(`id=${memory.id}`);
+			expect(baselineMemory).toContain("pirestorededit");
+			expect(baselineAll).toContain("pirestorededit");
+			const routed = createCtxSearchTool({
+				...common,
+				resolveStrataAsk: () => ({
+					baseUrl: String(server.url).replace(/\/$/, ""),
+					apiKey: "pi-strata-key",
+					apiKeyEnv: null,
+					model: "qwen-test",
+					slotFile: "mc-mem-v1.bin",
+					prefixPath,
+					project: "git:pi-status",
+					maxTokens: 64,
+					timeoutMs: 1500,
+					transientBudgetTokens: 1000,
+					contextDocs: [],
+					contextDocsBudgetTokens: 4000,
+				}),
+			});
+			const ledgers = [
+				`${JSON.stringify({ op: "update", id: memory.id, ts })}\n{"op":"rem`,
+				`${remove}\n`,
+				`${add}\n${remove}\n`,
+				`${remove}\n${add}\n`,
+			];
+			for (const [index, ledger] of ledgers.entries()) {
+				writeFileSync(ledgerPath, ledger);
+				currentDb.mockClear();
+				search.mockClear();
+				const memoryOnly = await invoke(routed, ["memory"]);
+				expect(memoryOnly).toBe(baselineMemory);
+				expect(memoryOnly).not.toContain("讣");
+				expect(search).toHaveBeenCalledTimes(1);
+				expect(search.mock.calls[0]?.[4]?.sources).toEqual(["memory"]);
+				search.mockClear();
+				const fused = await invoke(routed);
+				expect(fused).toBe(baselineAll);
+				expect(fused).not.toContain("讣");
+				expect(search).toHaveBeenCalledTimes(2);
+				expect(search.mock.calls[0]?.[4]?.sources).toEqual([
+					"git_commit", "primer", "note", "message",
+				]);
+				expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
+				expect(currentDb).toHaveBeenCalledTimes(index === 0 ? 0 : 2);
+			}
+			// A dashboard restore with no update row is unsafe even if the
+			// slot never contained the memory.
+			writeFileSync(prefixPath, JSON.stringify([
+				{ role: "system", content: "sys" },
+				{ role: "user", content: "no memory entries" },
+				{ role: "assistant", content: "ack" },
+			]));
+			writeFileSync(ledgerPath, `${add}\n${remove}\n`);
+			expect(await invoke(routed, ["memory"])).toBe(baselineMemory);
+			expect(await invoke(routed)).toBe(baselineAll);
+			expect(calls).toBe(0);
+			rmSync(ledgerPath, { force: true });
+			writeFileSync(`${prefixPath}.pending-write.json`, "{}");
+			expect(await invoke(routed, ["memory"])).toBe(baselineMemory);
+			expect(await invoke(routed)).toBe(baselineAll);
+			expect(calls).toBe(0);
+			rmSync(`${prefixPath}.pending-write.json`);
+			for (status of [409, 400]) {
+				rmSync(`${prefixPath}.sidecar-stale.json`, { force: true });
+				expect(await invoke(routed)).toBe(baselineAll);
+			}
+			expect(calls).toBe(2);
+		} finally {
+			currentDb.mockRestore();
+			search.mockRestore();
+			server.stop(true);
+			rmSync(prefixDir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
 	it("logs a failing timestamp side-query and returns classic without calling Strata", async () => {
 		const db = createTestDb();
 		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-"));
@@ -558,7 +793,7 @@ describe("createCtxSearchTool", () => {
 			return originalPrepare(sql);
 		});
 		const logged = spyOn(logger, "log").mockImplementation(() => {});
-		const common = { db, memoryEnabled: false, embeddingEnabled: false, resolveProjectIdentity: () => "git:pi-strata" };
+		const common = { db, memoryEnabled: true, embeddingEnabled: false, resolveProjectIdentity: () => "git:pi-strata" };
 		const ctx = fakeContext("ses-search", "/repo/pi-strata") as never;
 		const query = "where is sqlite";
 		try {
@@ -579,6 +814,32 @@ describe("createCtxSearchTool", () => {
 			const result = await tool.execute("fusion", { query }, new AbortController().signal, undefined, ctx);
 			expect(result.content[0]?.text).toBe(baseline.content[0]?.text);
 			expect(search).toHaveBeenCalledTimes(1);
+			search.mockImplementation(async (_db, _session, _project, _query, options) =>
+				options?.sources ? [{
+					source: "message", content: "sqlite archive", score: 1,
+					messageOrdinal: 3, messageId: "m3", role: "user",
+				}] : [{
+					source: "memory", content: "sqlite memory hit", score: 1,
+					memoryId: 123, category: "RESEARCH", matchType: "fts",
+				}],
+			);
+			for (const marker of ["sidecar-stale", "pending-write"]) {
+				const markerPath = `${prefixPath}.${marker}.json`;
+				writeFileSync(markerPath, marker === "sidecar-stale"
+					? JSON.stringify({ reason: "skipped_recovery", at: "now" }) : "{}");
+				search.mockClear();
+				const marked = await tool.execute("fusion", { query }, new AbortController().signal, undefined, ctx);
+				expect(marked.content[0]?.text).toContain("sqlite memory hit");
+				expect(search).toHaveBeenCalledTimes(2);
+				expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
+				rmSync(markerPath);
+			}
+			writeFileSync(statusChangesPathFor(prefixPath, "mc-mem-v1.bin"), '{"op":"rem');
+			search.mockClear();
+			const torn = await tool.execute("fusion", { query }, new AbortController().signal, undefined, ctx);
+			expect(torn.content[0]?.text).toContain("sqlite memory hit");
+			expect(search).toHaveBeenCalledTimes(2);
+			expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
 			expect(calls).toBe(0);
 			expect(logged).toHaveBeenCalledWith("[ctx_search] transient-material fallback: side-query failed");
 		} finally {

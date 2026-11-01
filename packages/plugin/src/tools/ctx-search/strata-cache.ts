@@ -1,17 +1,19 @@
+import { createHash, randomBytes } from "node:crypto";
 import {
     closeSync,
     existsSync,
+    fstatSync,
     mkdirSync,
     openSync,
     readdirSync,
     readFileSync,
+    readSync,
     renameSync,
     statSync,
     unlinkSync,
     writeFileSync,
     writeSync,
 } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { loadPluginConfigDetailed } from "../../config";
@@ -24,23 +26,24 @@ import { renderMemoryBlockV2 } from "../../hooks/magic-context/inject-compartmen
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import PROMPTS from "./strata-prompts.json";
+import { reduceLedgerRows } from "./ledger-reduce";
+import { clearSidecarStale, markSidecarStale, readSidecarStale } from "./sidecar-stale";
 import {
     enqueue,
     isRestoreSuccess,
     isStrataConfigResolutionFailure,
     nonEmpty,
     postWithDeadline,
-    safeBearer,
-    sessionBlockOf,
-    strataAskConnectionForProject,
-    strataNoThinking,
     type StrataAskConnection,
     type StrataPostFailure,
     type StrataSessionReply,
     type StrataSessionRequest,
+    safeBearer,
+    sessionBlockOf,
+    strataAskConnectionForProject,
+    strataNoThinking,
 } from "./strata-ask";
-import { clearSidecarStale, markSidecarStale, readSidecarStale } from "./sidecar-stale";
+import PROMPTS from "./strata-prompts.json";
 
 export interface CacheWatermark {
     count: number;
@@ -92,9 +95,15 @@ const DOCS_HEADER = "【项目参考文档】";
 const DOCS_NOTICE = "本节为本项目参考文档，属记忆库之组成部分；非记忆条目，不计入记忆库条数。";
 const DOCS_FOOTER = "【参考文档终】";
 const DOCS_EMPTY_BUDGET_NOTE = "（未载：预算已用尽）";
-const COUNT_QUESTION = "记忆库正文条目及变更流水中现行有效之条目（含新增、不含已作废者）共多少条？参考文档一节不计入。只回复阿拉伯数字，不要其他文字。";
-const DEBOUNCE_MS = 60_000;
-const FALLBACK_MS = 5 * 60_000;
+const COUNT_QUESTION =
+    "记忆库正文条目及变更流水中现行有效之条目（含新增、不含已作废者）共多少条？参考文档一节不计入。只回复阿拉伯数字，不要其他文字。";
+// A status ledger above this size is committed to the slot by the next
+// consolidation pass; a smaller one keeps accumulating. Deliberately a constant:
+// it sizes an internal write, while the query-side material budget is a separate
+// knob (memory.strata_ask.transient_budget_tokens).
+// The measure is the token estimate of the RENDERED change-flow lines, not the
+// raw JSONL ledger bytes.
+const STATUS_CONSOLIDATION_TOKENS = 2000;
 // Maintenance starts at least this long after the previous maintenance finished.
 const MAINTENANCE_COOLDOWN_MS = 60_000;
 // One prefix directory (normally one slot server) is guarded by one lock directory.
@@ -112,22 +121,30 @@ const CACHE_LOCK_RETRY_MS = 50;
 // A candidate must be visible this long before it may own the slot, so every
 // caller that registered in the same clock tick is seen before one is elected.
 const CACHE_LOCK_SETTLE_MS = 50;
-const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const scheduledProjects = new Set<string>();
-let fallbackTimer: ReturnType<typeof setInterval> | undefined;
 
 function resolveContext(projectRoot: string): CacheContext | null {
     if (!projectRoot) return null;
     try {
         const loaded = loadPluginConfigDetailed(projectRoot, false);
         if (isStrataConfigResolutionFailure(loaded.loadOutcome)) return null;
-        const project = resolveProjectIdentityForSession(projectRoot, loaded.config.allow_home_project);
+        const project = resolveProjectIdentityForSession(
+            projectRoot,
+            loaded.config.allow_home_project,
+        );
         if (!project) return null;
         const connection = strataAskConnectionForProject(loaded.config, project);
         if (!connection) return null;
-        const apiKey = safeBearer(connection.apiKey) ?? safeBearer(nonEmpty(process.env[connection.apiKeyEnv ?? ""]));
+        const apiKey =
+            safeBearer(connection.apiKey) ??
+            safeBearer(nonEmpty(process.env[connection.apiKeyEnv ?? ""]));
         if (!apiKey) return null;
-        return { projectRoot, connection, project, apiKey, budget: loaded.config.memory.injection_budget_tokens };
+        return {
+            projectRoot,
+            connection,
+            project,
+            apiKey,
+            budget: loaded.config.memory.injection_budget_tokens,
+        };
     } catch {
         log("strata-cache disabled: resolution_failure");
         return null;
@@ -141,12 +158,18 @@ export interface RenderedDocs {
 }
 
 /** Read only at rebuild time; the token budget covers the complete rendered section. */
-export function renderDocsSection(projectRoot: string, docs: readonly string[], budget: number): RenderedDocs | null {
+export function renderDocsSection(
+    projectRoot: string,
+    docs: readonly string[],
+    budget: number,
+): RenderedDocs | null {
     const entries: Array<{ path: string; name: string; text: string }> = [];
     for (const path of docs) {
         const resolved = path.startsWith("~/")
             ? join(homedir(), path.slice(2))
-            : isAbsolute(path) ? path : join(projectRoot, path);
+            : isAbsolute(path)
+              ? path
+              : join(projectRoot, path);
         try {
             if (!statSync(resolved).isFile()) throw new Error("not a regular file");
             entries.push({ path, name: basename(resolved), text: readFileSync(resolved, "utf8") });
@@ -157,17 +180,19 @@ export function renderDocsSection(projectRoot: string, docs: readonly string[], 
     if (entries.length === 0) return null;
 
     const limit = Number.isFinite(budget) ? Math.floor(budget) : 0;
-    const sectionOf = (blocks: string[]) => [
-        `${DOCS_HEADER}\n${DOCS_NOTICE}`,
-        ...blocks,
-        DOCS_FOOTER,
-    ].join("\n\n");
+    const sectionOf = (blocks: string[]) =>
+        [`${DOCS_HEADER}\n${DOCS_NOTICE}`, ...blocks, DOCS_FOOTER].join("\n\n");
     const fits = (blocks: string[]) => estimateTokens(sectionOf(blocks)) <= limit;
     const fullBlock = (entry: (typeof entries)[number]) => `〔${entry.name}〕\n${entry.text}`;
-    const omitted = (remaining: typeof entries) => remaining.map((entry) => `〔${entry.name}${DOCS_EMPTY_BUDGET_NOTE}〕`);
+    const omitted = (remaining: typeof entries) =>
+        remaining.map((entry) => `〔${entry.name}${DOCS_EMPTY_BUDGET_NOTE}〕`);
     const allBlocks = entries.map(fullBlock);
     if (fits(allBlocks)) {
-        return { section: sectionOf(allBlocks), files: entries.map((entry) => entry.path), truncated: entries.map(() => false) };
+        return {
+            section: sectionOf(allBlocks),
+            files: entries.map((entry) => entry.path),
+            truncated: entries.map(() => false),
+        };
     }
     if (!fits([DOCS_EMPTY_BUDGET_NOTE])) {
         log("context-docs budget too small, skipped");
@@ -177,8 +202,7 @@ export function renderDocsSection(projectRoot: string, docs: readonly string[], 
     const blocks: string[] = [];
     const files: string[] = [];
     const truncated: boolean[] = [];
-    for (let index = 0; index < entries.length; index++) {
-        const entry = entries[index]!;
+    for (const [index, entry] of entries.entries()) {
         const remaining = entries.slice(index + 1);
         const namedNotes = omitted(remaining);
         const full = fullBlock(entry);
@@ -211,7 +235,8 @@ export function renderDocsSection(projectRoot: string, docs: readonly string[], 
         let length = 0;
         while (low <= high) {
             const middle = Math.floor((low + high) / 2);
-            const candidate = boundaries[middle]!;
+            const candidate = boundaries[middle];
+            if (candidate === undefined) break;
             if (fits([...blocks, truncatedBlock(candidate), ...notes])) {
                 length = candidate;
                 low = middle + 1;
@@ -238,9 +263,7 @@ export function docsSectionOf(userContent: string): string | null {
     // A reference file may itself mention the footer. Prefer the footer attached
     // to the real acknowledgement; a standalone section has no acknowledgement.
     const anchoredFooter = userContent.indexOf(`\n\n${DOCS_FOOTER}\n\n${ACK_REQUEST}`);
-    const end = anchoredFooter >= start
-        ? anchoredFooter + 2
-        : userContent.lastIndexOf(DOCS_FOOTER);
+    const end = anchoredFooter >= start ? anchoredFooter + 2 : userContent.lastIndexOf(DOCS_FOOTER);
     if (end < start + DOCS_HEADER.length) return null;
     return userContent.slice(start, end + DOCS_FOOTER.length);
 }
@@ -275,10 +298,11 @@ function slotKeyOf(slotFile: string): string {
 }
 
 /**
- * Pending events of one slot, beside its prefix file; slots sharing a directory
+ * Status ledger of one slot, beside its prefix file; slots sharing a directory
  * never mix. A legacy shared `pending-changes.jsonl` is deliberately ignored,
- * not migrated: these events only accelerate an append, and the next maintenance
- * rebuild reconciles whatever a dropped event would have carried.
+ * not migrated: a dreamer consolidation pass commits these events into the slot,
+ * and the next full rebuild reconciles whatever a dropped event would have
+ * carried.
  */
 export function pendingChangesPathFor(prefixPath: string, slotFile: string): string {
     return join(dirname(prefixPath), `pending-changes.${slotKeyOf(slotFile)}.jsonl`);
@@ -304,16 +328,22 @@ function readPending(path: string): string {
 
 function atomicWrite(path: string, content: string): void {
     const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    // No throw inside finally (biome noUnsafeFinally): the primary failure is
+    // captured, the temp cleanup error is recorded only when nothing else failed.
+    let failure: unknown;
     try {
         writeFileSync(temporary, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
         renameSync(temporary, path);
-    } finally {
-        try {
-            unlinkSync(temporary);
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        }
+    } catch (error) {
+        failure = error;
     }
+    try {
+        unlinkSync(temporary);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && failure === undefined)
+            failure = error;
+    }
+    if (failure !== undefined) throw failure;
 }
 
 interface CacheLockOwner {
@@ -404,7 +434,10 @@ function readProcStart(pid: number): string | null {
     const close = raw.lastIndexOf(")");
     if (close < 0) return null;
     // After "pid (comm)": field 3 (state) is index 0, so field 22 is index 19.
-    const fields = raw.slice(close + 1).trim().split(/\s+/);
+    const fields = raw
+        .slice(close + 1)
+        .trim()
+        .split(/\s+/);
     const token = fields[19];
     return token !== undefined && /^\d+$/.test(token) ? token : null;
 }
@@ -430,7 +463,9 @@ function lockIsStale(entry: CacheLockEntry): boolean {
         // evidence, and it is deliberately generous so a long valid rebuild is
         // not preempted. Logged because this path weakens reuse detection.
         if (Date.now() - entry.modifiedAt > CACHE_LOCK_LEGACY_STALE_MS) {
-            log(`strata-cache lock reclaimed without process-start token: pid ${owner.pid} ${entry.name}`);
+            log(
+                `strata-cache lock reclaimed without process-start token: pid ${owner.pid} ${entry.name}`,
+            );
             return true;
         }
         return false;
@@ -476,9 +511,10 @@ function readCacheLockEntries(directory: string): CacheLockEntry[] {
             modifiedAt: stats.mtimeMs,
         });
     }
-    return entries.sort((left, right) =>
-        left.createdAt - right.createdAt ||
-        (left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+    return entries.sort(
+        (left, right) =>
+            left.createdAt - right.createdAt ||
+            (left.name < right.name ? -1 : left.name > right.name ? 1 : 0),
     );
 }
 
@@ -511,7 +547,8 @@ function createLockFile(path: string, payload: string): boolean {
         try {
             unlinkSync(path);
         } catch (cleanup) {
-            if ((cleanup as NodeJS.ErrnoException).code !== "ENOENT") log("strata-cache lock cleanup failed", cleanup);
+            if ((cleanup as NodeJS.ErrnoException).code !== "ENOENT")
+                log("strata-cache lock cleanup failed", cleanup);
         }
         throw error;
     } finally {
@@ -520,7 +557,9 @@ function createLockFile(path: string, payload: string): boolean {
 }
 
 /** Register once; the same candidate retains its arrival place across every poll. */
-function registerCacheLockCandidate(connection: Pick<StrataAskConnection, "prefixPath">): CacheLockCandidate {
+function registerCacheLockCandidate(
+    connection: Pick<StrataAskConnection, "prefixPath">,
+): CacheLockCandidate {
     const directory = cacheLockDirectoryFor(connection.prefixPath);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     // The name keeps the wall-clock stamp as its ordering fallback; the settle
@@ -572,7 +611,8 @@ function releaseCacheLock(path: string): void {
         // This path is unique to the caller and is never reused by a new owner.
         unlinkSync(path);
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") log("strata-cache lock release failed", error);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+            log("strata-cache lock release failed", error);
     }
 }
 
@@ -611,12 +651,14 @@ function readMaintenanceCompletion(connection: StrataAskConnection): number | nu
     try {
         raw = readFileSync(maintenanceStatePathFor(connection.prefixPath), "utf8");
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") log("strata-cache maintenance state unreadable", error);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+            log("strata-cache maintenance state unreadable", error);
         return null;
     }
     try {
         const value = JSON.parse(raw) as { completedAt?: unknown };
-        const at = typeof value.completedAt === "string" ? Date.parse(value.completedAt) : Number.NaN;
+        const at =
+            typeof value.completedAt === "string" ? Date.parse(value.completedAt) : Number.NaN;
         return Number.isFinite(at) ? at : null;
     } catch {
         return null;
@@ -627,7 +669,10 @@ function recordMaintenanceCompletion(connection: StrataAskConnection): void {
     try {
         const path = maintenanceStatePathFor(connection.prefixPath);
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-        atomicWrite(path, `${JSON.stringify({ completedAt: new Date().toISOString() }, null, 2)}\n`);
+        atomicWrite(
+            path,
+            `${JSON.stringify({ completedAt: new Date().toISOString() }, null, 2)}\n`,
+        );
     } catch (error) {
         log("strata-cache maintenance state write failed", error);
     }
@@ -670,79 +715,117 @@ function isMaintenanceDeferral(outcome: MaintenanceOutcome): outcome is Maintena
     return "retryAfterMs" in outcome;
 }
 
-// No await in this loop: local registrations cannot interleave. Appends are not
-// locked across processes, so the optimistic re-read incorporates their events
-// except in the final stat/rename window; drains holding the cache lock cannot
-// interleave with each other.
+// No await in this loop: local registrations cannot interleave. Ledger writes
+// are not locked across processes, so the optimistic re-read incorporates them
+// except in the final stat/rename window; consolidations holding the cache lock
+// cannot interleave with each other.
 function consumePending(path: string, consumed: string): void {
     if (!consumed) return;
     for (let attempt = 0; attempt < 10; attempt++) {
-        const current = readPending(path);
-        if (!current.startsWith(consumed)) {
-            throw new Error("pending-changes file changed during consumption");
-        }
-        const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
-        try {
-            writeFileSync(temporary, current.slice(consumed.length), {
-                encoding: "utf8",
-                mode: 0o600,
-                flag: "wx",
-            });
-            const before = statSync(path);
-            const latest = readPending(path);
-            const after = statSync(path);
-            if (
-                latest !== current ||
-                before.dev !== after.dev ||
-                before.ino !== after.ino ||
-                before.size !== after.size ||
-                before.mtimeMs !== after.mtimeMs
-            ) continue;
-            renameSync(temporary, path);
-            return;
-        } finally {
-            try {
-                unlinkSync(temporary);
-            } catch (error) {
-                if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            }
-        }
+        if (consumePendingAttempt(path, consumed)) return;
     }
     throw new Error("pending-changes file remained busy during consumption");
 }
 
-function parseChanges(raw: string): StoredChange[] {
-    if (!raw.endsWith("\n")) throw new Error("pending-changes contains an incomplete line");
-    return raw.slice(0, -1).split("\n").map((line) => {
-        let value: unknown;
-        try {
-            value = JSON.parse(line);
-        } catch {
-            throw new Error("pending-changes contains invalid JSON");
-        }
-        if (!value || typeof value !== "object" || Array.isArray(value)) {
-            throw new Error("pending-changes contains an invalid event");
-        }
-        const event = value as Record<string, unknown>;
+// No throw inside finally (biome noUnsafeFinally): a busy ledger returns false
+// and the loop retries, the primary error is captured, and the temp cleanup
+// error is recorded only when nothing else failed.
+function consumePendingAttempt(path: string, consumed: string): boolean {
+    const current = readPending(path);
+    if (!current.startsWith(consumed)) {
+        throw new Error("pending-changes file changed during consumption");
+    }
+    const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    let failure: unknown;
+    let renamed = false;
+    try {
+        writeFileSync(temporary, current.slice(consumed.length), {
+            encoding: "utf8",
+            mode: 0o600,
+            flag: "wx",
+        });
+        const before = statSync(path);
+        const latest = readPending(path);
+        const after = statSync(path);
         if (
-            !Number.isSafeInteger(event.id) ||
-            (event.id as number) < 1 ||
-            typeof event.ts !== "string" ||
-            !Number.isFinite(Date.parse(event.ts))
+            latest === current &&
+            before.dev === after.dev &&
+            before.ino === after.ino &&
+            before.size === after.size &&
+            before.mtimeMs === after.mtimeMs
         ) {
-            throw new Error("pending-changes contains an invalid event");
+            renameSync(temporary, path);
+            renamed = true;
         }
-        const id = event.id as number;
-        const ts = new Date(event.ts).toISOString();
-        if (event.op === "add" || event.op === "update") return { op: event.op, id, ts };
-        if (
-            event.op === "remove" &&
-            (event.kind === "archive" || event.kind === "delete" || event.kind === "superseded")
-        ) {
-            return { op: "remove", id, kind: event.kind, ts };
+    } catch (error) {
+        failure = error;
+    }
+    try {
+        unlinkSync(temporary);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && failure === undefined)
+            failure = error;
+    }
+    if (failure !== undefined) throw failure;
+    return renamed;
+}
+
+interface ParsedChanges {
+    changes: StoredChange[];
+    /** Lines dropped as unusable: a torn tail or a corrupt event. */
+    skipped: number;
+}
+
+/**
+ * Tolerant reader for the status ledger. A process killed mid-append leaves a
+ * torn final line, and any single unusable row must never poison the rest of the
+ * file, so bad lines are dropped and counted for the caller to report instead of
+ * failing the read. Dropping is best-effort by design: a lost event reconciles at
+ * the next full rebuild.
+ */
+export function parseChanges(raw: string): ParsedChanges {
+    const changes: StoredChange[] = [];
+    let skipped = 0;
+    for (const line of raw.split("\n")) {
+        // The empty tail after the final newline is not an event; every other
+        // unusable line is counted below.
+        if (line.trim() === "") continue;
+        const change = parseChangeLine(line);
+        if (!change) {
+            skipped++;
+            continue;
         }
-        throw new Error("pending-changes contains an invalid event");
-    });
+        changes.push(change);
+    }
+    return { changes, skipped };
+}
+
+function parseChangeLine(line: string): StoredChange | null {
+    let value: unknown;
+    try {
+        value = JSON.parse(line);
+    } catch {
+        return null;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const event = value as Record<string, unknown>;
+    if (
+        !Number.isSafeInteger(event.id) ||
+        (event.id as number) < 1 ||
+        typeof event.ts !== "string" ||
+        !Number.isFinite(Date.parse(event.ts))
+    )
+        return null;
+    const id = event.id as number;
+    const ts = new Date(event.ts).toISOString();
+    if (event.op === "add" || event.op === "update") return { op: event.op, id, ts };
+    if (
+        event.op === "remove" &&
+        (event.kind === "archive" || event.kind === "delete" || event.kind === "superseded")
+    ) {
+        return { op: "remove", id, kind: event.kind, ts };
+    }
+    return null;
 }
 
 function readPrefix(connection: StrataAskConnection): Message[] | null {
@@ -759,13 +842,20 @@ function readPrefix(connection: StrataAskConnection): Message[] | null {
     } catch {
         throw new Error("invalid prefix JSON");
     }
-    if (!Array.isArray(value) || value.length !== 3) throw new Error("invalid prefix messages");
-    const roles = ["system", "user", "assistant"] as const;
+    if (!Array.isArray(value) || value.length < 3 || value.length % 2 !== 1)
+        throw new Error("invalid prefix messages");
     return value.map((item, index) => {
-        if (!item || typeof item !== "object" || item.role !== roles[index] || typeof item.content !== "string") {
+        const role = index === 0 ? "system" : index % 2 === 1 ? "user" : "assistant";
+        if (
+            !item ||
+            typeof item !== "object" ||
+            !role ||
+            item.role !== role ||
+            typeof item.content !== "string"
+        ) {
             throw new Error("invalid prefix messages");
         }
-        return { role: roles[index]!, content: item.content as string };
+        return { role, content: item.content as string };
     });
 }
 
@@ -779,21 +869,24 @@ function parseWatermark(content: string): CacheWatermark | null {
     if (!match) return null;
     const count = Number(match[1]);
     const maxMemoryId = Number(match[2]);
-    const rebuiltAt = match[3]!;
+    const rebuiltAt = match[3];
     const maxMutationId = Number(match[4]);
     if (
+        rebuiltAt === undefined ||
         !Number.isSafeInteger(count) ||
         !Number.isSafeInteger(maxMemoryId) ||
         !Number.isSafeInteger(maxMutationId) ||
         !Number.isFinite(Date.parse(rebuiltAt))
-    ) return null;
+    )
+        return null;
     return { count, maxMemoryId, maxMutationId, rebuiltAt };
 }
 
 export function readCacheWatermark(cfg: StrataAskConnection): CacheWatermark | null {
     try {
         const prefix = readPrefix(cfg);
-        return prefix ? parseWatermark(prefix[1]!.content) : null;
+        if (!prefix) return null;
+        return parseWatermark(prefix[prefix.length - 2]!.content);
     } catch (error) {
         failure(error);
         return null;
@@ -809,7 +902,13 @@ function openMemoryDatabase(): Database {
 function readMemorySnapshot(project: string): MemorySnapshot {
     const db = openMemoryDatabase();
     return db.transaction(() => ({
-        memories: getAllActiveMemoriesForMigration(db, project).sort((a, b) => a.id - b.id),
+        // The consolidation snapshot must mirror the query side's effective set
+        // (strata-ask accepts active + permanent): a merge can leave the new
+        // memory permanent, and an active-only snapshot would undercount the
+        // ledger, skip its append, and drop its text from rebuilds.
+        memories: getAllActiveMemoriesForMigration(db, project, ["active", "permanent"]).sort(
+            (a, b) => a.id - b.id,
+        ),
         maxMutationId: getMaxMemoryMutationId(db, project) ?? 0,
     }))();
 }
@@ -835,14 +934,16 @@ function renderChanges(
 ): { lines: string[]; watermark: CacheWatermark } {
     const memories = new Map(snapshot.memories.map((memory) => [memory.id, memory]));
     const visibleIds = new Set<number>();
-    const entries = /^#(\d+) \[[^\]\n]+\] 〔[^\n]+〕：$|^〔[^\n]+〕讣：#(\d+) 已删除\/已归档，上文同号条目作废$/gm;
+    const entries =
+        /^#(\d+) \[[^\]\n]+\] 〔[^\n]+〕：$|^〔[^\n]+〕讣：#(\d+) 已删除\/已归档，上文同号条目作废$/gm;
     const section = docsSectionOf(previousContent);
     const docs = section?.startsWith(`${DOCS_HEADER}\n${DOCS_NOTICE}`) ? section : null;
     const docsStart = docs ? previousContent.indexOf(docs) : -1;
     // Keep later change-log entries in the ledger while excluding document text.
-    const ledger = docs && docsStart >= 0
-        ? previousContent.slice(0, docsStart) + previousContent.slice(docsStart + docs.length)
-        : previousContent;
+    const ledger =
+        docs && docsStart >= 0
+            ? previousContent.slice(0, docsStart) + previousContent.slice(docsStart + docs.length)
+            : previousContent;
     for (const match of ledger.matchAll(entries)) {
         if (match[1]) visibleIds.add(Number(match[1]));
         else visibleIds.delete(Number(match[2]));
@@ -852,16 +953,21 @@ function renderChanges(
     for (const change of changes) {
         const memory = memories.get(change.id);
         if (change.op === "add") {
-            if (memory) {
-                lines.push(`〔${change.ts}〕增：\n${renderMemory(memory)}`);
-                watermark.maxMemoryId = Math.max(watermark.maxMemoryId, memory.id);
-                if (!visibleIds.has(memory.id)) {
-                    visibleIds.add(memory.id);
-                    watermark.count++;
-                }
+            // A vanished `add` (recorded, then deleted before consolidation)
+            // renders on neither side: the query renderer skips it too, so
+            // both sides iterate the same filtered row set.
+            if (!memory) continue;
+            lines.push(`〔${change.ts}〕增：\n${renderMemory(memory)}`);
+            watermark.maxMemoryId = Math.max(watermark.maxMemoryId, memory.id);
+            if (!visibleIds.has(memory.id)) {
+                visibleIds.add(memory.id);
+                watermark.count++;
             }
         } else if (change.op === "update" && memory) {
-            lines.push(`〔${change.ts}〕正：#${change.id} 已修改为：「${memory.content}」，上文旧文作废`);
+            lines.push(
+                `〔${change.ts}〕正：#${change.id} 已修改为：「${memory.content}」，上文旧文作废`,
+            );
+        } else if (change.op === "remove" && memory) {
         } else {
             lines.push(`〔${change.ts}〕讣：#${change.id} 已删除/已归档，上文同号条目作废`);
             if (visibleIds.delete(change.id)) watermark.count--;
@@ -873,12 +979,14 @@ function renderChanges(
 class StrataCacheRequestError extends Error {
     readonly status: number | null;
     readonly errorType: string | null;
+    readonly serverMessage: string | null;
 
     constructor(failure: StrataPostFailure) {
         super(failure.reason);
         this.name = "StrataCacheRequestError";
         this.status = failure.status ?? null;
         this.errorType = failure.errorType ?? null;
+        this.serverMessage = failure.message ?? null;
     }
 }
 
@@ -897,7 +1005,9 @@ async function post(context: CacheContext, path: string, body: unknown): Promise
 
 /** Restore probe for maintenance: is there a saved slot to maintain? */
 async function restore(context: CacheContext): Promise<void> {
-    const result = await post(context, "/slots/0?action=restore", { filename: context.connection.slotFile });
+    const result = await post(context, "/slots/0?action=restore", {
+        filename: context.connection.slotFile,
+    });
     if (!isRestoreSuccess(result)) throw new Error("invalid restore reply");
 }
 
@@ -915,7 +1025,11 @@ function chatContentOf(result: unknown): string {
     return content;
 }
 
-async function chat(context: CacheContext, messages: Message[], session?: StrataSessionRequest): Promise<ChatReply> {
+async function chat(
+    context: CacheContext,
+    messages: Message[],
+    session?: StrataSessionRequest,
+): Promise<ChatReply> {
     const result = await post(context, "/v1/chat/completions", {
         model: context.connection.model,
         messages,
@@ -927,14 +1041,32 @@ async function chat(context: CacheContext, messages: Message[], session?: Strata
     return { content: chatContentOf(result), session: sessionBlockOf(result) };
 }
 
-async function selfCheck(context: CacheContext, prefix: Message[], watermark: CacheWatermark): Promise<void> {
+function hasSaveConfirmation(session: StrataSessionReply | null): boolean {
+    if (
+        session?.save_error !== undefined ||
+        !session?.saved ||
+        typeof session.saved !== "object" ||
+        Array.isArray(session.saved)
+    )
+        return false;
+    const saved = session.saved as { tokens?: unknown; bytes?: unknown };
+    return (
+        typeof saved.tokens === "number" &&
+        Number.isSafeInteger(saved.tokens) &&
+        saved.tokens >= 0 &&
+        typeof saved.bytes === "number" &&
+        Number.isSafeInteger(saved.bytes) &&
+        saved.bytes >= 0
+    );
+}
+
+async function selfCheck(context: CacheContext, watermark: CacheWatermark): Promise<void> {
     // One composite restore-only request: the restore and the count question run
     // in the same server turn, and nothing is saved.
-    const reply = await chat(
-        context,
-        [...prefix, { role: "user", content: COUNT_QUESTION }],
-        { restore: context.connection.slotFile },
-    );
+    const reply = await chat(context, [{ role: "user", content: COUNT_QUESTION }], {
+        restore: context.connection.slotFile,
+        splice: true,
+    });
     if (!/^\s*\d+\s*$/.test(reply.content) || Number(reply.content.trim()) !== watermark.count) {
         throw new Error("count self-check failed");
     }
@@ -975,27 +1107,30 @@ async function generateAndSave(
     while (true) {
         try {
             const reply = await chat(context, input, session);
-            if (reply.session?.save_error !== undefined) {
-                log("strata-cache save: the server reported save_error; the sidecar is unchanged", reply.session.save_error);
+            if (!hasSaveConfirmation(reply.session)) {
+                log(
+                    "strata-cache save: missing save confirmation or server reported save_error",
+                    reply.session?.save_error,
+                );
                 throw new Error("slot save failed");
             }
             if (reply.session?.sidecar === "skipped_recovery") {
                 log("strata-cache save: sidecar skipped after a reasoning-loop recovery");
                 markSidecarStale(context.connection.prefixPath, "skipped_recovery");
-            } else if (reply.session) {
+                throw new Error("sidecar recovery skipped");
+            } else {
                 // A written sidecar is fresh again, so any earlier marker is spent.
                 clearSidecarStale(context.connection.prefixPath);
-            } else {
-                // Without a session block there is no evidence the sidecar was
-                // rewritten, so an earlier marker stays until a reply proves it.
-                log("strata-cache save: reply carried no session block; sidecar marker left as is");
             }
             return [...input, { role: "assistant", content: reply.content }];
         } catch (error) {
             const failure = error instanceof StrataCacheRequestError ? error : null;
             if (failure?.status === 409 && !conflictRetried) {
                 conflictRetried = true;
-                log("strata-cache save: the server replied 409; retrying the composite save once", failure.errorType);
+                log(
+                    "strata-cache save: the server replied 409; retrying the composite save once",
+                    failure.errorType,
+                );
                 continue;
             }
             if (failure?.status === 404 && session.restore && !missingRetried) {
@@ -1039,7 +1174,7 @@ async function rebuildLocked(
 ): Promise<CacheActionResult> {
     const path = pendingPath(context.connection);
     // Only events present before the DB snapshot may be consumed; events arriving
-    // while the model is running stay in the file for the next drain.
+    // while the model is running stay in the ledger for the next consolidation.
     const pending = readPending(path);
     const snapshot = readMemorySnapshot(context.project);
     const watermark = watermarkFor(snapshot, new Date().toISOString());
@@ -1047,12 +1182,27 @@ async function rebuildLocked(
     // system (no change-log rules) must be replaced, not inherited.
     const system = SYSTEM_MESSAGE;
     const blocks = snapshot.memories.map(renderMemory).join("\n\n");
-    const docs = renderDocsSection(context.projectRoot, context.connection.contextDocs, context.connection.contextDocsBudgetTokens);
-    const user = composeSlotUser(INTRO, blocks, docs?.section ?? null, ACK_REQUEST, watermarkLine(watermark));
+    const docs = renderDocsSection(
+        context.projectRoot,
+        context.connection.contextDocs,
+        context.connection.contextDocsBudgetTokens,
+    );
+    const user = composeSlotUser(
+        INTRO,
+        blocks,
+        docs?.section ?? null,
+        ACK_REQUEST,
+        watermarkLine(watermark),
+    );
     mkdirSync(dirname(context.connection.prefixPath), { recursive: true, mode: 0o700 });
     // Reuse the saved prefix inside the same request: the system message is
     // unchanged, so the rebuilt chat only pays for the new user turn. Without a
     // published prefix there is nothing to restore, so the first build skips it.
+    // The save can succeed remotely even if its response is lost or incomplete.
+    atomicWrite(
+        pendingWritePath(context.connection.prefixPath),
+        `${JSON.stringify({ at: new Date().toISOString() })}\n`,
+    );
     const prefix = await generateAndSave(
         context,
         system,
@@ -1060,55 +1210,199 @@ async function rebuildLocked(
         restoreFirst && existsSync(context.connection.prefixPath),
     );
     try {
-        await selfCheck(context, prefix, watermark);
+        await selfCheck(context, watermark);
     } catch (error) {
         if (!docs) throw error;
-        log("strata-cache docs: count self-check failed; reference docs may interfere, retrying once", error);
-        await selfCheck(context, prefix, watermark);
+        log(
+            "strata-cache docs: count self-check failed; reference docs may interfere, retrying once",
+            error,
+        );
+        await selfCheck(context, watermark);
     }
     atomicWrite(context.connection.prefixPath, `${JSON.stringify(prefix, null, 2)}\n`);
     consumePending(path, pending);
+    unlinkPendingWrite(context.connection.prefixPath);
     return { action: reason === "create" ? "created" : "rebuilt", detail: reason, watermark };
 }
 
-async function drainLocked(context: CacheContext): Promise<CacheActionResult> {
+/**
+ * The append decision plus everything it renders from, resolved under the cache
+ * lock so one consolidation pass sees one consistent ledger and prefix.
+ */
+interface StatusAppend {
+    path: string;
+    /** The exact ledger bytes this pass read; consumption is anchored on them. */
+    raw: string;
+    prefix: Message[];
+    content: string;
+    lines: string[];
+    watermark: CacheWatermark;
+}
+
+/** What committing these events would add to the slot, in estimated tokens. */
+function estimateStatusTokens(lines: readonly string[]): number {
+    return estimateTokens(lines.join("\n\n"));
+}
+
+/** A pure-addition batch splices onto the tail; anything else rewrites the slot. */
+function statusIsAddOnly(changes: readonly StoredChange[]): boolean {
+    return changes.length > 0 && changes.every((change) => change.op === "add");
+}
+
+/**
+ * Commit the status ledger only when it is worth a write. Order matters:
+ * a stale sidecar outranks everything (every splice query fails until a save
+ * rewrites it); otherwise the ledger must hold more than
+ * STATUS_CONSOLIDATION_TOKENS of future slot text, and only a pure-addition batch
+ * may splice onto the tail — a batch carrying an update or a removal rewrites the
+ * slot from the database snapshot.
+ */
+function pendingWritePath(prefixPath: string): string {
+    return `${prefixPath}.pending-write.json`;
+}
+
+function hasPendingWrite(prefixPath: string): boolean {
+    try {
+        statSync(pendingWritePath(prefixPath));
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+    }
+}
+
+function unlinkPendingWrite(prefixPath: string): void {
+    try {
+        unlinkSync(pendingWritePath(prefixPath));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+}
+
+async function consolidateLocked(context: CacheContext): Promise<CacheActionResult> {
     const path = pendingPath(context.connection);
+    if (hasPendingWrite(context.connection.prefixPath))
+        return rebuildLocked(context, "pending-write");
+    if (readSidecarStale(context.connection.prefixPath))
+        return rebuildLocked(context, "sidecar-stale");
     const pending = readPending(path);
     if (!pending) return { action: "skipped", detail: "no-pending-changes" };
-    const changes = parseChanges(pending);
+    const parsed = parseChanges(pending);
+    parsed.changes = reduceLedgerRows(parsed.changes, (change) => change);
+    if (parsed.changes.length === 0 && parsed.skipped === 0)
+        return { action: "skipped", detail: "no-pending-changes" };
+    // The ledger keeps the bad rows either way: below the commit threshold
+    // they stay queued (this warning is the only signal), above it they veto
+    // the splice and the batch rebuilds instead.
+    if (parsed.skipped > 0)
+        log(`strata-cache status: ${parsed.skipped} unusable ledger line(s) retained`);
+    // Creating the cache is maintenance's call (it owns the creation threshold);
+    // consolidation only commits into a prefix that is already published.
     const prefix = readPrefix(context.connection);
     if (!prefix) return { action: "skipped", detail: "cache-missing" };
-    const previousWatermark = parseWatermark(prefix[1]!.content);
-    if (!previousWatermark) throw new Error("cache watermark missing; rebuild required");
+    const content = prefix
+        .filter((message) => message.role === "user")
+        .map((message) => message.content)
+        .join("\n\n");
+    const previousWatermark = parseWatermark(prefix[prefix.length - 2]!.content);
+    if (!previousWatermark) return rebuildLocked(context, "watermark-missing");
     const snapshot = readMemorySnapshot(context.project);
-    const { lines, watermark } = renderChanges(changes, snapshot, prefix[1]!.content, previousWatermark);
-    if (lines.length === 0) {
-        consumePending(path, pending);
-        return { action: "skipped", detail: "no-applicable-changes", watermark: previousWatermark };
+    const rendered = renderChanges(parsed.changes, snapshot, content, previousWatermark);
+    if (rendered.lines.length === 0) {
+        // Matching watermarks cannot prove the slot contains the snapshot's
+        // actual entries. Rebuild before consuming even a clean dead ledger.
+        return rebuildLocked(
+            context,
+            parsed.skipped > 0 ? "status-unparseable" : "snapshot-mismatch",
+        );
     }
-    const user = prefix[1]!.content;
-    const oldLine = watermarkLine(previousWatermark);
-    const beforeWatermark = user.slice(0, -oldLine.length);
+    if (estimateStatusTokens(rendered.lines) <= STATUS_CONSOLIDATION_TOKENS) {
+        return { action: "skipped", detail: "below-threshold", watermark: previousWatermark };
+    }
+    // A corrupt row voids the batch shape: what parses as pure additions may
+    // hide a removal or an update, so it may never splice onto the tail.
+    if (parsed.skipped > 0) return rebuildLocked(context, "status-unparseable");
+    if (!statusIsAddOnly(parsed.changes)) return rebuildLocked(context, "status-mixed-changes");
+    return appendStatusLocked(context, {
+        path,
+        raw: pending,
+        prefix,
+        content,
+        lines: rendered.lines,
+        watermark: rendered.watermark,
+    });
+}
+
+async function appendStatusLocked(
+    context: CacheContext,
+    append: StatusAppend,
+): Promise<CacheActionResult> {
+    const beforeWatermark = append.content;
     const section = docsSectionOf(beforeWatermark);
     const docs = section?.startsWith(`${DOCS_HEADER}\n${DOCS_NOTICE}`) ? section : null;
     const docsEnd = docs ? beforeWatermark.indexOf(docs) + docs.length : 0;
     const ackStart = beforeWatermark.indexOf(ACK_REQUEST, docsEnd);
-    const hasChangeLog = beforeWatermark.indexOf(`\n\n${CHANGE_LOG}\n`, ackStart < 0 ? 0 : ackStart + ACK_REQUEST.length) >= 0;
-    const separator = hasChangeLog ? "" : `\n${CHANGE_LOG}\n`;
-    const updatedUser = `${beforeWatermark}${separator}${lines.join("\n\n")}\n\n${watermarkLine(watermark)}`;
-    // prefix.json exists here, so the saved slot is the prefix the append builds on;
-    // the restore rides the same composite request as the save.
-    const updatedPrefix = await generateAndSave(context, prefix[0]!.content, updatedUser, true);
+    const hasChangeLog =
+        beforeWatermark.indexOf(
+            `\n\n${CHANGE_LOG}\n`,
+            ackStart < 0 ? 0 : ackStart + ACK_REQUEST.length,
+        ) >= 0;
+    const separator = hasChangeLog ? "" : `${CHANGE_LOG}\n`;
+    const updatedUser = `${separator}${append.lines.join("\n\n")}\n\n${watermarkLine(append.watermark)}`;
+    const input: Message = { role: "user", content: updatedUser };
+    const slotFile = context.connection.slotFile;
+    let reply: ChatReply;
+    atomicWrite(
+        pendingWritePath(context.connection.prefixPath),
+        `${JSON.stringify({ at: new Date().toISOString() })}\n`,
+    );
     try {
-        await selfCheck(context, updatedPrefix, watermark);
+        reply = await chat(context, [input], { restore: slotFile, splice: true, save: slotFile });
+    } catch (error) {
+        // Mirrors spliceFailureOf in strata-ask.ts; only documented splice failures
+        // invalidate the sidecar, not unrelated 409s such as model_busy.
+        const failure = error instanceof StrataCacheRequestError ? error : null;
+        const stale =
+            failure?.status === 409 &&
+            (failure.errorType === "splice_stale" || failure.errorType === "splice_base_seam")
+                ? failure.errorType
+                : failure?.status === 400 &&
+                    failure.serverMessage?.startsWith("splice_render_mismatch")
+                  ? "splice_render_mismatch"
+                  : null;
+        if (!stale) throw error;
+        markSidecarStale(context.connection.prefixPath, stale);
+        return rebuildLocked(context, "sidecar-stale");
+    }
+    if (!hasSaveConfirmation(reply.session)) throw new Error("slot save failed");
+    if (reply.session?.splice?.resume_ok === false)
+        log("strata-cache append: splice resume_ok=false; base was recomputed");
+    if (reply.session?.sidecar === "skipped_recovery") {
+        markSidecarStale(context.connection.prefixPath, "skipped_recovery");
+        throw new Error("sidecar recovery skipped");
+    } else if (reply.session) {
+        clearSidecarStale(context.connection.prefixPath);
+    }
+    const updatedPrefix: Message[] = [
+        ...append.prefix,
+        input,
+        { role: "assistant", content: reply.content },
+    ];
+    try {
+        await selfCheck(context, append.watermark);
     } catch (error) {
         log("strata-cache append self-check failed; rebuilding", error);
         // The failed self-check just restored this prefix, so rebuild needs no restore.
         return rebuildLocked(context, "self-check", false);
     }
     atomicWrite(context.connection.prefixPath, `${JSON.stringify(updatedPrefix, null, 2)}\n`);
-    consumePending(path, pending);
-    return { action: "appended", detail: `applied ${lines.length} change(s)`, watermark };
+    consumePending(append.path, append.raw);
+    unlinkPendingWrite(context.connection.prefixPath);
+    return {
+        action: "appended",
+        detail: `applied ${append.lines.length} change(s)`,
+        watermark: append.watermark,
+    };
 }
 
 async function queued<T>(work: () => Promise<T>): Promise<T> {
@@ -1117,102 +1411,116 @@ async function queued<T>(work: () => Promise<T>): Promise<T> {
     return result as T;
 }
 
+/**
+ * Append one ledger row. A previous write may have been torn by a crash, leaving
+ * a partial row with no terminator; closing that line first keeps the new event
+ * from merging into the dead bytes and being discarded with them.
+ */
+function appendLedgerLine(path: string, line: Buffer): void {
+    const fd = openSync(path, "a+", 0o600);
+    try {
+        const size = fstatSync(fd).size;
+        const payload =
+            size > 0 && !endsWithNewline(fd, size)
+                ? Buffer.concat([Buffer.from("\n"), line])
+                : line;
+        if (writeSync(fd, payload, 0, payload.length, null) !== payload.length) {
+            throw new Error("short pending-changes write");
+        }
+    } finally {
+        closeSync(fd);
+    }
+}
+
+function endsWithNewline(fd: number, size: number): boolean {
+    const last = Buffer.alloc(1);
+    return readSync(fd, last, 0, 1, size - 1) === 1 && last[0] === 0x0a;
+}
+
+/**
+ * Record one memory change in the slot's status ledger. This never writes the
+ * slot: a change is committed by the dreamer's consolidation pass (or the daily
+ * rebuild), so a tool call costs one appended line and no remote write.
+ */
 export function recordMemoryChange(projectRoot: string, event: MemoryChangeEvent): void {
     try {
         const context = resolveContext(projectRoot);
         if (!context) return;
-        if (!Number.isSafeInteger(event.memoryId) || event.memoryId < 1) throw new Error("invalid memory id");
+        if (!Number.isSafeInteger(event.memoryId) || event.memoryId < 1)
+            throw new Error("invalid memory id");
         const ts = new Date().toISOString();
-        const stored: StoredChange = event.op === "remove"
-            ? { op: event.op, id: event.memoryId, kind: event.kind, ts }
-            : { op: event.op, id: event.memoryId, ts };
+        const stored: StoredChange =
+            event.op === "remove"
+                ? { op: event.op, id: event.memoryId, kind: event.kind, ts }
+                : { op: event.op, id: event.memoryId, ts };
         const path = pendingPath(context.connection);
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-        const line = Buffer.from(`${JSON.stringify(stored)}\n`, "utf8");
-        const fd = openSync(path, "a", 0o600);
-        try {
-            if (writeSync(fd, line, 0, line.length, null) !== line.length) {
-                throw new Error("short pending-changes write");
-            }
-        } finally {
-            closeSync(fd);
-        }
-        scheduleDrain(projectRoot);
+        appendLedgerLine(path, Buffer.from(`${JSON.stringify(stored)}\n`, "utf8"));
     } catch (error) {
         failure(error);
     }
 }
 
-export function scheduleDrain(projectRoot: string): void {
-    try {
-        if (!resolveContext(projectRoot)) return;
-        scheduledProjects.add(projectRoot);
-        const previous = debounceTimers.get(projectRoot);
-        if (previous) clearTimeout(previous);
-        const timer = setTimeout(() => {
-            debounceTimers.delete(projectRoot);
-            void drainPendingChanges(projectRoot);
-        }, DEBOUNCE_MS);
-        timer.unref();
-        debounceTimers.set(projectRoot, timer);
-        if (!fallbackTimer) {
-            fallbackTimer = setInterval(() => {
-                for (const root of scheduledProjects) void drainPendingChanges(root);
-            }, FALLBACK_MS);
-            fallbackTimer.unref();
-        }
-    } catch (error) {
-        failure(error);
-    }
-}
-
-export async function drainPendingChanges(projectRoot: string): Promise<CacheActionResult> {
+/**
+ * Commit the status ledger if it is worth a write. The dreamer's hourly
+ * consolidation task calls this; it is the only writer besides the daily
+ * rebuild, so recording a memory change never causes an immediate remote write.
+ */
+export async function consolidateCache(projectRoot: string): Promise<CacheActionResult> {
     try {
         const context = resolveContext(projectRoot);
         if (!context) return { action: "disabled", detail: "strata-ask-disabled" };
-        return await queued(() => withCacheLock(context.connection, () => drainLocked(context)));
+        return await queued(() =>
+            withCacheLock(context.connection, () => consolidateLocked(context)),
+        );
     } catch (error) {
         return failure(error);
     }
 }
 
-export async function rebuildCache(projectRoot: string, reason: string): Promise<CacheActionResult> {
+export async function rebuildCache(
+    projectRoot: string,
+    reason: string,
+): Promise<CacheActionResult> {
     try {
         const context = resolveContext(projectRoot);
         if (!context) return { action: "disabled", detail: "strata-ask-disabled" };
-        return await queued(() => withCacheLock(context.connection, () => rebuildLocked(context, reason)));
+        return await queued(() =>
+            withCacheLock(context.connection, () => rebuildLocked(context, reason)),
+        );
     } catch (error) {
         return failure(error);
     }
 }
 
 async function maintainLocked(context: CacheContext): Promise<CacheActionResult> {
+    if (hasPendingWrite(context.connection.prefixPath))
+        return rebuildLocked(context, "pending-write");
     const staleSidecar = readSidecarStale(context.connection.prefixPath);
     // Restore first: a saved slot is reused as the KV prefix, and only a 404 says
     // there is no cache to maintain yet.
     const exists = await restoreSavedSlot(context);
-    const pending = readPending(pendingPath(context.connection));
     const snapshot = readMemorySnapshot(context.project);
     if (!exists) {
         const estimate = estimateTokens(renderMemoryBlockV2(snapshot.memories));
-        if (!staleSidecar && estimate <= context.budget && context.connection.contextDocs.length === 0) {
+        if (
+            !staleSidecar &&
+            estimate <= context.budget &&
+            context.connection.contextDocs.length === 0
+        ) {
             return { action: "skipped", detail: "below-threshold" };
         }
         return rebuildLocked(context, "create", false);
     }
-    const watermark = readCacheWatermark(context.connection);
-    const latest = watermarkFor(snapshot, new Date().toISOString());
-    if (
-        // A stale sidecar forces a rebuild even when every watermark is current:
-        // splice queries keep failing until a save rewrites it. The save clears
-        // the marker; a save that skips the sidecar leaves a fresh marker behind.
-        staleSidecar ||
-        !watermark ||
-        watermark.maxMemoryId < latest.maxMemoryId ||
-        watermark.maxMutationId < latest.maxMutationId ||
-        pending.length > 0
-    ) return rebuildLocked(context, staleSidecar ? "sidecar-stale" : "daily-compaction", false);
-    return { action: "skipped", detail: "unchanged", watermark };
+    // The daily pass always rebuilds from the current database snapshot.
+    // Watermark equality never proves content equality: a migrate-session
+    // move and a dreamer addition can offset each other in count while every
+    // max id still matches, and an append can advance the max-id watermark
+    // past an unrecorded change. A stale sidecar likewise forces a rebuild
+    // even when every watermark is current: splice queries keep failing until
+    // a save rewrites it. Once a day the full rebuild is the exact, cheap
+    // answer; a pending ledger (if any) is consumed by the rebuild.
+    return rebuildLocked(context, staleSidecar ? "sidecar-stale" : "daily-compaction", false);
 }
 
 export async function maintainCache(projectRoot: string): Promise<CacheActionResult> {
@@ -1229,7 +1537,7 @@ export async function maintainCache(projectRoot: string): Promise<CacheActionRes
                     // lock, so a caller that acquires the lock reads the true gap.
                     const cooldown = maintenanceCooldown(context.connection);
                     const skewAlreadyWaited =
-                        cooldown !== null && cooldown.cappedBySkew && cooldown.completion === waitedOutSkew;
+                        cooldown?.cappedBySkew === true && cooldown.completion === waitedOutSkew;
                     if (cooldown && cooldown.remainingMs > 0 && !skewAlreadyWaited) {
                         return {
                             retryAfterMs: cooldown.remainingMs,

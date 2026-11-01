@@ -9,7 +9,7 @@ import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
 import { buildDreamTaskRuntimeConfigs } from "./task-config";
-import { CANONICAL_DREAM_TASKS, type DreamTaskName } from "./task-registry";
+import { CANONICAL_DREAM_TASKS, type DreamTaskName, isStrataCacheDreamTask } from "./task-registry";
 import {
     type DreamTaskRuntimeConfig,
     runDueTasksForProject,
@@ -45,7 +45,7 @@ function expectedTasks(memory: boolean, smartNotes: boolean): DreamTaskName[] {
     return CANONICAL_DREAM_TASKS.filter((task) => {
         if (MEMORY_TASKS.includes(task)) return memory;
         // These test executors supply no Strata eligibility probe (fail closed).
-        if (task === "strata-cache-maintain") return false;
+        if (isStrataCacheDreamTask(task)) return false;
         if (task === "evaluate-smart-notes") return smartNotes;
         return true; // maintain-docs, review-user-memories
     });

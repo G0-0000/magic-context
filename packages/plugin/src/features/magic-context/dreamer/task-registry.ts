@@ -26,6 +26,7 @@ export const CANONICAL_DREAM_TASKS = [
     "promote-primers",
     "refresh-primers",
     "strata-cache-maintain",
+    "strata-cache-consolidate",
 ] as const;
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
@@ -125,6 +126,7 @@ export const DREAM_TASK_CAPABILITIES: Record<DreamTaskName, DreamTaskCapability>
         toolLoopPurpose: "needs read-only investigation tools to answer each standing question",
     },
     "strata-cache-maintain": { requiresTools: false, transport: "host-only" },
+    "strata-cache-consolidate": { requiresTools: false, transport: "host-only" },
 };
 
 /** Tasks a host without a tool loop cannot run, in canonical order. */
@@ -277,7 +279,17 @@ export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
     "promote-primers",
     "refresh-primers",
     "strata-cache-maintain",
+    "strata-cache-consolidate",
 ];
+
+/**
+ * Whether a task maintains the project's Strata cache. Both such tasks follow
+ * `memory.strata_ask.enabled`, never call a model, and must not consume another
+ * checkout's due slot when this checkout is opted out.
+ */
+export function isStrataCacheDreamTask(task: DreamTaskName): boolean {
+    return task === "strata-cache-maintain" || task === "strata-cache-consolidate";
+}
 
 const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);
 

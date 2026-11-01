@@ -38,6 +38,7 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
     "promote-primers": "Promote recurring project questions into Primers",
     "refresh-primers": "Refresh answers for active project Primers",
     "strata-cache-maintain": "Maintain the strata memory cache (daily compaction)",
+    "strata-cache-consolidate": "Commit queued memory changes to the strata memory cache (hourly)",
 };
 
 /** v1-behavior-preserving default schedules (must match the Zod schema defaults). */
@@ -55,6 +56,7 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "promote-primers": "0 3 * * *",
     "refresh-primers": "0 3 * * *",
     "strata-cache-maintain": "30 8 * * *",
+    "strata-cache-consolidate": "17 * * * *",
 };
 
 const PRESET_CUSTOM = "__custom__";

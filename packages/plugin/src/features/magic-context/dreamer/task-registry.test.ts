@@ -5,6 +5,7 @@ import {
     CANONICAL_DREAM_TASKS,
     DREAM_TASK_CAPABILITIES,
     isCanonicalDreamTask,
+    isStrataCacheDreamTask,
     leaseKeyFor,
     MEMORY_DOMAIN_TASKS,
 } from "./task-registry";
@@ -24,6 +25,7 @@ describe("dreamer task registry", () => {
             "promote-primers",
             "refresh-primers",
             "strata-cache-maintain",
+            "strata-cache-consolidate",
         ]);
         // map-memories leads the canonical order (records the mappings verify gates on).
         expect(CANONICAL_DREAM_TASKS.indexOf("map-memories")).toBe(0);
@@ -47,6 +49,21 @@ describe("dreamer task registry", () => {
         expect(leaseKeyFor("strata-cache-maintain", "git:example")).toBe("memory:git:example");
         expect(CANONICAL_DREAM_TASKS.indexOf("strata-cache-maintain")).toBeGreaterThan(
             CANONICAL_DREAM_TASKS.indexOf("refresh-primers"),
+        );
+    });
+
+    test("strata-cache-consolidate is host-only, memory-domain, and ordered after the daily rebuild", () => {
+        expect(isCanonicalDreamTask("strata-cache-consolidate")).toBe(true);
+        expect(isStrataCacheDreamTask("strata-cache-consolidate")).toBe(true);
+        expect(isStrataCacheDreamTask("strata-cache-maintain")).toBe(true);
+        expect(isStrataCacheDreamTask("verify")).toBe(false);
+        expect(DREAM_TASK_CAPABILITIES["strata-cache-consolidate"]).toEqual({
+            requiresTools: false,
+            transport: "host-only",
+        });
+        expect(leaseKeyFor("strata-cache-consolidate", "git:example")).toBe("memory:git:example");
+        expect(CANONICAL_DREAM_TASKS.indexOf("strata-cache-consolidate")).toBe(
+            CANONICAL_DREAM_TASKS.indexOf("strata-cache-maintain") + 1,
         );
     });
 });
