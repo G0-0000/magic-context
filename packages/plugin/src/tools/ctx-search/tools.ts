@@ -26,7 +26,14 @@ import {
     DEFAULT_CTX_SEARCH_LIMIT,
 } from "./constants";
 import { parseSearchDateRange, SearchDateRangeError } from "./date-range";
-import { STRATA_ASK_FOOTER, STRATA_ASK_MISS, strataRouteFor, tryStrataAskDetailed } from "./strata-ask";
+import {
+    hasUnsafeStrataCache,
+    readStrataStatusDocument,
+    STRATA_ASK_FOOTER,
+    STRATA_ASK_MISS,
+    strataRouteFor,
+    tryStrataAskDetailed,
+} from "./strata-ask";
 import { buildTransientMaterial } from "./transient-material";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
@@ -141,7 +148,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 // the live tail and must be excluded. A negative sentinel here would mean
                 // "search everything" and leak the current prompt back to the agent — the
                 // exact opposite of the intent (issue #131).
-                const lastCompartmentEnd = getLastCompartmentEndMessage(deps.db, toolContext.sessionID);
+                const lastCompartmentEnd = getLastCompartmentEndMessage(
+                    deps.db,
+                    toolContext.sessionID,
+                );
                 const messageOrdinalCutoff = lastCompartmentEnd >= 0 ? lastCompartmentEnd : 0;
 
                 // Hard-filter memories already rendered in <session-history>.
@@ -163,7 +173,8 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 }
                 await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
                 const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
-                const memoryEnabled = embeddingSnapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+                const memoryEnabled =
+                    embeddingSnapshot?.features.memoryEnabled ?? deps.memoryEnabled;
                 // Query embedding serves history, memory and commit lanes alike, so it
                 // follows the provider alone; each lane applies its own feature gate.
                 const embeddingEnabled = embeddingSnapshot
@@ -189,7 +200,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         const results = idResults ?? [];
                         return {
                             ok: true as const,
-                            text: formatSearchResults(query, results, toolContext.sessionID, diagnostics),
+                            text: formatSearchResults(
+                                query,
+                                results,
+                                toolContext.sessionID,
+                                diagnostics,
+                            ),
                             results,
                             diagnostics,
                         };
@@ -263,11 +279,24 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         connection = null;
                     }
                     if (connection && connection.project === projectPath) {
+                        const activeConnection = connection;
+                        // The status document rides every cache query, on both
+                        // routes: the ledger holds the memory changes the archived
+                        // copy does not carry yet. It is read from the caller's
+                        // handle — the same store the tool already serves from —
+                        // and the read runs INSIDE the shared queue, as close to
+                        // the splice request as possible: a consolidation queued
+                        // ahead of this query then writes the slot before the
+                        // status freezes, never after. An unreadable or over-cap
+                        // status fails the query to classic retrieval.
+                        const readStatus = () =>
+                            readStrataStatusDocument(activeConnection, deps.db);
                         if (route === "memory-only") {
                             const answer = await tryStrataAskDetailed({
                                 query,
-                                config: connection,
+                                config: activeConnection,
                                 signal: toolContext.abort,
+                                statusDocument: readStatus,
                             });
                             if (answer.status === "answered") return answer.text;
                             if (answer.status === "miss") {
@@ -275,8 +304,16 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             }
                             return (await runClassic({ sources: ["memory"] })).text;
                         }
-                        // Fusion searches non-memory sources once; miss/failure
-                        // returns this exact result rather than searching again.
+                        // Fusion searches non-memory sources once, for the
+                        // transient materials; a miss, or a failure with the
+                        // status document itself readable, returns that exact
+                        // result rather than searching again. A status the
+                        // cache cannot carry at all (unreadable ledger, failed
+                        // memory lookup, rows over the cap) is different: the
+                        // pre-run never searched memories, and without the
+                        // ledger's changes it is not authoritative — the query
+                        // falls back to the FULL classic search, memories
+                        // included.
                         const classic = await runClassic({
                             sources: ["git_commit", "primer", "note", "message"],
                         });
@@ -288,21 +325,36 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                                 sessionId: toolContext.sessionID,
                                 query,
                                 results: classic.results,
-                                budgetTokens: connection.transientBudgetTokens,
+                                budgetTokens: activeConnection.transientBudgetTokens,
                             })?.text;
                         } catch (error) {
-                            const reason = (error instanceof Error ? error.message : String(error))
-                                .replace(/[\r\n]+/g, " ");
+                            const reason = (
+                                error instanceof Error ? error.message : String(error)
+                            ).replace(/[\r\n]+/g, " ");
                             log(`[ctx_search] transient-material fallback: ${reason}`);
+                            if (
+                                hasUnsafeStrataCache(activeConnection.prefixPath) ||
+                                !readStatus().ok
+                            ) {
+                                return (await runClassic()).text;
+                            }
                             return classic.text;
                         }
                         const answer = await tryStrataAskDetailed({
                             query,
-                            config: connection,
+                            config: activeConnection,
                             signal: toolContext.abort,
                             transient,
+                            statusDocument: readStatus,
                         });
-                        return answer.status === "answered" ? answer.text : classic.text;
+                        if (answer.status === "answered") return answer.text;
+                        if (
+                            answer.status === "failed" &&
+                            ["status_unavailable", "http_409", "http_400"].includes(answer.reason)
+                        ) {
+                            return (await runClassic()).text;
+                        }
+                        return classic.text;
                     }
                 }
             }

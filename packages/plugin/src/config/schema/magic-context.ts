@@ -568,6 +568,9 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "promote-primers": "0 3 * * *",
     "refresh-primers": "0 3 * * *",
     "strata-cache-maintain": "30 8 * * *",
+    // Hourly, staggered off the 08:30 rebuild: commits a status ledger the
+    // memory tools have let grow past its size threshold.
+    "strata-cache-consolidate": "17 * * * *",
 };
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
@@ -633,6 +636,9 @@ export const DreamTasksSchema = z
         ),
         "strata-cache-maintain": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("strata-cache-maintain")),
+        ),
+        "strata-cache-consolidate": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("strata-cache-consolidate")),
         ),
     })
     .describe(
@@ -1891,6 +1897,7 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "dreamer.tasks.promote-primers.promotion_threshold",
     "dreamer.tasks.refresh-primers.schedule",
     "dreamer.tasks.strata-cache-maintain.schedule",
+    "dreamer.tasks.strata-cache-consolidate.schedule",
     "memory.git_commit_indexing.enabled",
     "memory.git_commit_indexing.since_days",
     "memory.git_commit_indexing.max_commits",

@@ -10,6 +10,7 @@ import {
 import { getMemoryMutationsForRender } from "@magic-context/core/features/magic-context/storage";
 import { handleUntrustedLoad } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import type { MemoryChangeEvent } from "@magic-context/core/tools/ctx-memory/types";
 import { Value } from "typebox/value";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxMemoryListTool, createCtxMemoryTool } from "./ctx-memory";
@@ -149,6 +150,68 @@ describe("createCtxMemoryTool", () => {
 					limit: 5,
 				}),
 			).toBe(true);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps dreamer curate writes out of the strata ledger while other callers record", async () => {
+		const db = createTestDb();
+		try {
+			const changes: { event: MemoryChangeEvent; projectDir: string }[] = [];
+			const onMemoryChanged = (
+				event: MemoryChangeEvent,
+				projectDir: string,
+			) => changes.push({ event, projectDir });
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+				onMemoryChanged,
+			});
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+				onMemoryChanged,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+
+			const primaryResult = await primary.execute(
+				"call-primary",
+				{
+					action: "write",
+					category: "OPS_RULES",
+					content: "Primary sessions record their memory writes.",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			expect(primaryResult.content[0]?.text).toContain("Saved memory [ID:");
+			expect(changes).toHaveLength(1);
+			expect(changes[0]?.event).toEqual({
+				op: "add",
+				memoryId: expect.any(Number),
+			});
+
+			// The dreamer curate context still writes the memory; only the ledger
+			// registration is skipped.
+			const dreamerResult = await dreamer.execute(
+				"call-dreamer",
+				{
+					action: "write",
+					category: "OPS_RULES",
+					content: "Dreamer curate writes stay out of the strata ledger.",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			expect(dreamerResult.content[0]?.text).toContain("Saved memory [ID:");
+			expect(changes).toHaveLength(1);
 		} finally {
 			closeQuietly(db);
 		}
