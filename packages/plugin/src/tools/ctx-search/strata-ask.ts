@@ -1,11 +1,21 @@
 /**
  * Bare ctx_search → Strata session-file cache.
  *
- * The two HTTP calls (slot restore, then chat) are serialized by an in-process
- * promise queue so one ctx_search cannot restore over another's in-flight
- * completion. That mutex does not span processes: another client, or another
- * Magic Context process, can still clobber slot 0 between restore and chat.
- * This prototype accepts that race. A restore success is not a cache-hit proof.
+ * A query is ONE `POST /v1/chat/completions` carrying just the new user turn
+ * plus `strata_session: { restore, splice: true }`. The server restores the
+ * saved slot, splices the base into the prompt and runs the completion inside
+ * one fifo turn, so no other client — and no other Magic Context process — can
+ * clobber slot 0 in between. The base tokens come from the server-side token
+ * sidecar, not from a locally replayed prefix.
+ *
+ * This module never saves. The write side (strata-cache.ts) owns every save,
+ * which is what keeps the sidecar in step with the prompt the cache answers
+ * from. When the composite request reports that the sidecar cannot serve this
+ * splice (`splice_stale`, `splice_base_seam`, `splice_render_mismatch`), the
+ * answer comes from `askOnceLegacy` — the restore-then-replay flow that shipped
+ * before the endpoint, byte-identical — and a marker is left beside
+ * `prefix_path` (sidecar-stale.ts) so the next maintenance write rebuilds the
+ * sidecar. Every other failure is a plain fallback to classic retrieval.
  *
  * `memory.strata_ask.*` is intentionally absent from LIVE_RELOAD_CONFIG_PATHS.
  * That list is for historian and dreamer sampling. ctx_search does not use it:
@@ -15,7 +25,8 @@
  * incomplete connection, or a project identity that is missing or not equal to
  * a configured project target is disabled: this module returns null and the
  * caller continues on the classic path. Identity is resolved before any network
- * call. `timeout_ms` bounds the prefix read and each HTTP call separately.
+ * call. `timeout_ms` bounds one composite request, and each legacy call
+ * separately.
  */
 
 import { readFile } from "node:fs/promises";
@@ -25,6 +36,7 @@ import { loadPluginConfigDetailed } from "../../config";
 import { parseIdShapedQuery } from "../../features/magic-context/search";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { log } from "../../shared/logger";
+import { markSidecarStale } from "./sidecar-stale";
 
 /** Query template; copy lives in strata-prompts.json (edit there, rebuild dists). */
 export const STRATA_ASK_T4 = PROMPTS.t4;
@@ -38,16 +50,45 @@ export type StrataAskOutcome =
     | { status: "miss" }
     | { status: "failed"; reason: string };
 
+/** `strata_session` request object: every key is optional; the server rejects others. */
+export interface StrataSessionRequest {
+    restore?: string;
+    save?: string;
+    splice?: boolean;
+}
+
+/** The `session` block a composite reply carries; absent on a plain chat reply. */
+export interface StrataSessionReply {
+    restored?: { tokens?: unknown };
+    splice?: {
+        base_tokens?: unknown;
+        delta_tokens?: unknown;
+        resume?: unknown;
+        resume_ok?: unknown;
+    };
+    saved?: { tokens?: unknown; bytes?: unknown; ms?: unknown };
+    save_error?: unknown;
+    sidecar?: unknown;
+}
+
+/** The `session` block of a composite reply; null when the server sent none. */
+export function sessionBlockOf(json: unknown): StrataSessionReply | null {
+    if (!json || typeof json !== "object" || Array.isArray(json)) return null;
+    const session = (json as { session?: unknown }).session;
+    if (!session || typeof session !== "object" || Array.isArray(session)) return null;
+    return session as StrataSessionReply;
+}
+
 export const STRATA_ASK_FOOTER =
     "——本答案由项目记忆缓存合成，可能融合期外材料摘要；记忆原文可按 #id 用 ctx_memory get，其余确切原文请用 ctx_expand 或显式 sources 参数";
 
 /**
- * Temporary: every Strata chat call (ctx_search cache query, ACK, count
- * self-check) asks the server to answer without reasoning, because shared-slot
- * locking is unsolved — slot 0 can still be clobbered between restore and chat,
- * so a reasoning prefix is both wasted and unsafe to reuse. Restore `low` (or the
- * server default) once locking spans processes. Restore and save carry only a
- * slot filename and never reach the template, so they get no fragment.
+ * Every Strata chat call (ctx_search cache query, ACK, count self-check) asks
+ * the server to answer without reasoning: the callers want a one-line answer,
+ * and one fixed template kwarg keeps the rendered turn byte-stable across
+ * requests. `chat_template_kwargs` is a top-level field the server handles
+ * independently of `strata_session`, so restore/save-only requests carry it too
+ * even though a slot filename never reaches the template.
  */
 export function strataNoThinking(): { chat_template_kwargs: { enable_thinking: false } } {
     return { chat_template_kwargs: { enable_thinking: false } };
@@ -283,7 +324,7 @@ function isExactMiss(content: string): boolean {
 }
 
 function fallback(reason: string): StrataAskOutcome {
-    const safe = /^(?:file_error|invalid_prefix|invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3})$/.test(
+    const safe = /^(?:file_error|invalid_prefix|invalid_endpoint|missing_key|timeout|aborted|invalid_reply|network_error|http_\d{3}|splice_stale|splice_base_seam|splice_render_mismatch)$/.test(
         reason,
     )
         ? reason
@@ -297,10 +338,11 @@ const ABORTED = Symbol("strata-ask-aborted");
 let queue: Promise<void> = Promise.resolve();
 
 /**
- * Serialize restore/chat. The caller's wait is abortable: an abort while queued
- * resolves immediately, and the slot, once reached, skips the network. The slot
- * is still held until the previous turn finishes, so a later caller cannot
- * restore over an in-flight completion.
+ * Serialize this process's Strata work: queries and the write side share this
+ * queue. The caller's wait is abortable: an abort while queued resolves
+ * immediately, and the slot, once reached, skips the network. The slot is still
+ * held until the previous turn finishes, so this process never overlaps two
+ * calls; other processes are kept apart by the server's per-request turn.
  */
 export function enqueue<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T | typeof ABORTED> {
     const previous = queue;
@@ -390,13 +432,48 @@ async function readPrefix(
     return messages;
 }
 
+export interface StrataPostFailure {
+    ok: false;
+    reason: string;
+    /** HTTP status of a non-2xx reply; absent for transport and reply-shape failures. */
+    status?: number;
+    /** `error.type` from the reply body, when the body parsed. */
+    errorType?: string;
+    /** `error.message` from the reply body, when the body parsed. */
+    message?: string;
+}
+
+export type StrataPostResult = { ok: true; json: unknown } | StrataPostFailure;
+
+/** Read `{"error": {"type", "message"}}` under the caller's deadline; never fail the call. */
+async function readErrorBody(
+    response: Response,
+    signal: AbortSignal,
+): Promise<{ errorType?: string; message?: string }> {
+    try {
+        const raw = await response.text();
+        if (signal.aborted) return {};
+        const parsed: unknown = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+        const error = (parsed as { error?: unknown }).error;
+        if (!error || typeof error !== "object" || Array.isArray(error)) return {};
+        const row = error as { type?: unknown; message?: unknown };
+        return {
+            errorType: typeof row.type === "string" ? row.type : undefined,
+            message: typeof row.message === "string" ? row.message : undefined,
+        };
+    } catch {
+        return {};
+    }
+}
+
 async function postJson(args: {
     url: string;
     body: unknown;
     apiKey: string;
     signal: AbortSignal;
     fetchImpl: typeof fetch;
-}): Promise<{ ok: true; json: unknown } | { ok: false; reason: string }> {
+}): Promise<StrataPostResult> {
     let response: Response;
     try {
         response = await args.fetchImpl(args.url, {
@@ -414,11 +491,18 @@ async function postJson(args: {
         return { ok: false, reason: "network_error" };
     }
     if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
         const status = response.status;
+        const known = Number.isInteger(status) && status >= 100 && status <= 599;
+        // The body is read under the same signal, so a 409/400 cannot outrun
+        // timeout_ms. Without `error.type` a splice failure is indistinguishable
+        // from any other rejection, which is why this body is not cancelled.
+        const detail = await readErrorBody(response, args.signal);
         return {
             ok: false,
-            reason: Number.isInteger(status) && status >= 100 && status <= 599 ? `http_${status}` : "network_error",
+            reason: known ? `http_${status}` : "network_error",
+            status: known ? status : undefined,
+            errorType: detail.errorType,
+            message: detail.message,
         };
     }
     try {
@@ -457,7 +541,7 @@ export function isRestoreSuccess(json: unknown): boolean {
     return typeof restored === "number" && Number.isFinite(restored);
 }
 
-/** One `timeout_ms` budget per HTTP call, not one budget shared across both. */
+/** One `timeout_ms` budget per HTTP call, not one budget shared across calls. */
 export async function postWithDeadline(args: {
     url: string;
     body: unknown;
@@ -465,7 +549,7 @@ export async function postWithDeadline(args: {
     caller: AbortSignal | undefined;
     timeoutMs: number;
     fetchImpl: typeof fetch;
-}): Promise<{ ok: true; json: unknown } | { ok: false; reason: string }> {
+}): Promise<StrataPostResult> {
     const linked = linkedSignal(args.caller, args.timeoutMs);
     try {
         if (linked.signal.aborted) {
@@ -478,26 +562,110 @@ export async function postWithDeadline(args: {
             signal: linked.signal,
             fetchImpl: args.fetchImpl,
         });
-        if (!result.ok) return { ok: false, reason: linked.timedOut() ? "timeout" : result.reason };
+        // Keep the structured failure (status, error.type, message): the splice
+        // dispatch depends on it. Only a deadline turns every failure into timeout.
+        if (!result.ok) return linked.timedOut() ? { ok: false, reason: "timeout" } : result;
         return result;
     } finally {
         linked.cleanup();
     }
 }
 
-async function askOnce(args: {
+interface AskRequest {
     query: string;
     config: StrataAskConnection;
     signal?: AbortSignal;
     fetchImpl: typeof fetch;
     readFileImpl: (path: string) => Promise<string> | string;
     transient?: string;
-}): Promise<StrataAskOutcome> {
+}
+
+/** `choices[0].message.content` only; `reasoning_content` never reaches the answer. */
+function outcomeOf(json: unknown): StrataAskOutcome {
+    if (!json || typeof json !== "object") return fallback("invalid_reply");
+    const choices = (json as { choices?: unknown }).choices;
+    if (!Array.isArray(choices) || choices.length === 0) return fallback("invalid_reply");
+    const message = (choices[0] as { message?: unknown } | null)?.message;
+    if (!message || typeof message !== "object") return fallback("invalid_reply");
+    const content = (message as { content?: unknown }).content;
+    if (typeof content !== "string" || content.trim().length === 0) return fallback("invalid_reply");
+    if (isExactMiss(content)) return { status: "miss" };
+    return { status: "answered", text: `${content.trimEnd()}\n${STRATA_ASK_FOOTER}` };
+}
+
+/**
+ * A splice failure the legacy flow can still answer. Dispatch is on `error.type`
+ * (and, for the 400, on the message prefix the server documents): a 409 is not
+ * automatically a splice problem — `model_busy` is a plain failure.
+ */
+function spliceFailureOf(result: StrataPostFailure): string | null {
+    if (result.status === 409 && (result.errorType === "splice_stale" || result.errorType === "splice_base_seam")) {
+        return result.errorType;
+    }
+    if (result.status === 400 && result.message?.startsWith("splice_render_mismatch")) {
+        return "splice_render_mismatch";
+    }
+    return null;
+}
+
+/** `resume_ok: false` means the base was recomputed, not that the answer is wrong. */
+function logSessionObservations(json: unknown): void {
+    const splice = sessionBlockOf(json)?.splice;
+    if (splice?.resume_ok === false) {
+        log("strata-ask: splice resume missed; the base was recomputed this turn (answer unaffected)");
+    }
+}
+
+async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
     if (args.signal?.aborted) return fallback("aborted");
     const apiKey = safeBearer(args.config.apiKey) ?? safeBearer(nonEmpty(process.env[args.config.apiKeyEnv ?? ""]));
     if (!apiKey) return fallback("missing_key");
     if (!/^https?:\/\//.test(args.config.baseUrl)) return fallback("invalid_endpoint");
 
+    const chat = await postWithDeadline({
+        url: `${args.config.baseUrl}/v1/chat/completions`,
+        body: {
+            model: args.config.model,
+            // Splice carries only the new turn: no system role, no replayed prefix.
+            messages: [{ role: "user", content: renderQueryMessage(args.query, args.transient) }],
+            max_tokens: args.config.maxTokens,
+            stream: false,
+            strata_session: { restore: args.config.slotFile, splice: true },
+            ...strataNoThinking(),
+        },
+        apiKey,
+        caller: args.signal,
+        timeoutMs: args.config.timeoutMs,
+        fetchImpl: args.fetchImpl,
+    });
+    if (!chat.ok) {
+        const splice = spliceFailureOf(chat);
+        if (splice) {
+            // The sidecar cannot serve this splice. Answer through the old flow and
+            // leave the rebuild to the write side: a query must never save.
+            markSidecarStale(args.config.prefixPath, splice);
+            return askOnceLegacy(args, apiKey);
+        }
+        // Anything else falls through to classic retrieval, where the structured
+        // failure is otherwise lost: record its type and message (never the key
+        // and never the request or reply body).
+        log("strata-ask: composite request failed; classic retrieval answers this query", {
+            reason: chat.reason,
+            errorType: chat.errorType ?? null,
+            message: chat.message ?? null,
+        });
+        return fallback(chat.reason);
+    }
+    logSessionObservations(chat.json);
+    return outcomeOf(chat.json);
+}
+
+/**
+ * The pre-composite flow, kept verbatim: read the frozen prefix, restore the
+ * saved slot, then send the full message array. Only a splice failure reaches
+ * this path, so these request bytes are the compatibility lock for its output.
+ */
+async function askOnceLegacy(args: AskRequest, apiKey: string): Promise<StrataAskOutcome> {
     const prefixLinked = linkedSignal(args.signal, args.config.timeoutMs);
     let prefix: Array<Record<string, unknown>> | null;
     try {
@@ -540,16 +708,7 @@ async function askOnce(args: {
         fetchImpl: args.fetchImpl,
     });
     if (!chat.ok) return fallback(chat.reason);
-    const body = chat.json;
-    if (!body || typeof body !== "object") return fallback("invalid_reply");
-    const choices = (body as { choices?: unknown }).choices;
-    if (!Array.isArray(choices) || choices.length === 0) return fallback("invalid_reply");
-    const message = (choices[0] as { message?: unknown } | null)?.message;
-    if (!message || typeof message !== "object") return fallback("invalid_reply");
-    const content = (message as { content?: unknown }).content;
-    if (typeof content !== "string" || content.trim().length === 0) return fallback("invalid_reply");
-    if (isExactMiss(content)) return { status: "miss" };
-    return { status: "answered", text: `${content.trimEnd()}\n${STRATA_ASK_FOOTER}` };
+    return outcomeOf(chat.json);
 }
 
 export async function tryStrataAskDetailed(args: {
