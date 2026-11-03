@@ -2058,12 +2058,13 @@ export function trimMemoriesToBudgetV2(
     budgetTokens: number,
     renderOptions: MemoryRenderOptions = {},
 ): TrimMemoriesResultV2 {
-    const selectionOrder = [...memories].sort(compareMemorySelectionPriority);
+    const lineTokens = new Map(memories.map((memory) => [memory, estimateTokens(`${renderMemoryLineV2(memory, renderOptions.sourceNameByMemoryId?.get(memory.id))}\n`)]));
+    const selectionOrder = [...memories].sort((a, b) => compareMemorySelectionPriority({ ...a, lineTokens: lineTokens.get(a)! }, { ...b, lineTokens: lineTokens.get(b)! }));
     const selected: Memory[] = [];
-    const accounting = createMemoryBlockAccounting(renderOptions);
+    const accounting = createMemoryBlockAccounting();
 
     for (const memory of selectionOrder) {
-        const cost = accounting.candidateCost(memory);
+        const cost = accounting.candidateCost(memory, lineTokens.get(memory)!);
         if (accounting.usedTokens + cost > budgetTokens) continue;
         accounting.admit(memory, cost);
         selected.push(memory);
@@ -2092,12 +2093,14 @@ export function trimWorkspaceMemoriesToBudgetV2(
         return trimMemoriesToBudgetV2(sessionId, memories, budgetTokens, renderOptions);
     }
 
+    const lineTokens = new Map(memories.map((memory) => [memory, estimateTokens(`${renderMemoryLineV2(memory, renderOptions.sourceNameByMemoryId?.get(memory.id))}\n`)]));
+    const compare = (a: Memory, b: Memory) => compareMemorySelectionPriority({ ...a, lineTokens: lineTokens.get(a)! }, { ...b, lineTokens: lineTokens.get(b)! });
     const selected: Memory[] = [];
     const selectedIds = new Set<number>();
-    const accounting = createMemoryBlockAccounting(renderOptions);
+    const accounting = createMemoryBlockAccounting();
     const trySelect = (memory: Memory): boolean => {
         if (selectedIds.has(memory.id)) return false;
-        const cost = accounting.candidateCost(memory);
+        const cost = accounting.candidateCost(memory, lineTokens.get(memory)!);
         if (accounting.usedTokens + cost > budgetTokens) return false;
         selected.push(memory);
         selectedIds.add(memory.id);
@@ -2107,7 +2110,7 @@ export function trimWorkspaceMemoriesToBudgetV2(
 
     for (const memory of memories
         .filter((candidate) => candidate.status === "permanent")
-        .sort(compareMemorySelectionPriority)) {
+        .sort(compare)) {
         trySelect(memory);
     }
 
@@ -2125,10 +2128,10 @@ export function trimWorkspaceMemoriesToBudgetV2(
 
     for (const identity of workspace.identities) {
         let memberTokens = 0;
-        const candidates = (byIdentity.get(identity) ?? []).sort(compareMemorySelectionPriority);
+        const candidates = (byIdentity.get(identity) ?? []).sort(compare);
         for (const memory of candidates) {
             if (selectedIds.has(memory.id)) continue;
-            const cost = accounting.candidateCost(memory);
+            const cost = accounting.candidateCost(memory, lineTokens.get(memory)!);
             if (memberTokens + cost > floorTokens) continue;
             if (accounting.usedTokens + cost > budgetTokens) continue;
             selected.push(memory);
@@ -2140,7 +2143,7 @@ export function trimWorkspaceMemoriesToBudgetV2(
 
     const remaining = memories
         .filter((memory) => !selectedIds.has(memory.id))
-        .sort(compareMemorySelectionPriority);
+        .sort(compare);
     for (const memory of remaining) {
         trySelect(memory);
     }
@@ -2309,17 +2312,13 @@ function readNewCompartments(
  * conservative and the injected block can only land under the budget, never
  * over it.
  */
-function createMemoryBlockAccounting(renderOptions: MemoryRenderOptions) {
+function createMemoryBlockAccounting() {
     const seenCategories = new Set<string>();
     const categoryCost = new Map<string, number>();
     return {
         usedTokens: estimateTokens("<project-memory>\n</project-memory>"),
-        candidateCost(memory: Memory): number {
-            const line = renderMemoryLineV2(
-                memory,
-                renderOptions.sourceNameByMemoryId?.get(memory.id),
-            );
-            let cost = estimateTokens(`${line}\n`);
+        candidateCost(memory: Memory, lineTokens: number): number {
+            let cost = lineTokens;
             if (!seenCategories.has(memory.category)) {
                 let tags = categoryCost.get(memory.category);
                 if (tags === undefined) {

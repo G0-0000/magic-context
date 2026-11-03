@@ -44912,7 +44912,7 @@ pub(crate) mod tests {
 
     #[test]
     fn global_memory_render_epoch_hards_all_profiles_once_then_stabilizes() {
-        assert_eq!(crate::MEMORY_RENDER_FORMAT_EPOCH, 3);
+        assert_eq!(crate::MEMORY_RENDER_FORMAT_EPOCH, 4);
         for profile in [
             SerializerProfile::OwnedLlmRunner,
             SerializerProfile::Pi,

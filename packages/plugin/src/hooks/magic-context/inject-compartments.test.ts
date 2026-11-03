@@ -62,9 +62,11 @@ import {
     renderMemoryBlockV2,
     renderMemoryLineV2,
     trimMemoriesToBudgetV2,
+    trimWorkspaceMemoriesToBudgetV2,
 } from "./inject-compartments";
 import { withRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb, withReadOnlySessionDb } from "./read-session-db";
+import * as formatting from "./read-session-formatting";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 
@@ -396,6 +398,43 @@ describe("compact project-memory wire", () => {
         );
 
         expect(trimmed.selected.map((memory) => memory.id)).toEqual([verifiedYesterday.id]);
+    });
+
+    it("scores the actual workspace attribution on the rendered line", () => {
+        const first = renderMemory(1, "RESEARCH", "same fact", 50);
+        const second = renderMemory(2, "RESEARCH", "same fact", 50);
+        const sourceNameByMemoryId = new Map([[1, "long source ".repeat(500)]]);
+        expect(estimateTokens(`${renderMemoryLineV2(first, sourceNameByMemoryId.get(1))}\n`)).toBeGreaterThan(768);
+        expect(trimMemoriesToBudgetV2(SESSION_ID, [first, second], 10_000, { sourceNameByMemoryId }).selected.map((memory) => memory.id)).toEqual([2, 1]);
+    });
+
+    it("counts the attributed workspace line once across both selection passes", () => {
+        const memory = { ...renderMemory(7, "RESEARCH", "fact"), projectPath: "a", status: "active" } as Memory;
+        const sourceNameByMemoryId = new Map([[7, "source"]]);
+        const line = "#7 [source]: fact\n";
+        expect(`${renderMemoryLineV2(memory, "source")}\n`).toBe(line);
+        const wrapperTokens = estimateTokens("<project-memory>\n</project-memory>");
+        const candidateTokens = estimateTokens(line) + estimateTokens("<RESEARCH>\n</RESEARCH>\n");
+        const budget = wrapperTokens + candidateTokens;
+        const identities = ["a", "b"];
+        const workspace = {
+            identities,
+            expandedIdentities: identities,
+            ownIdentities: ["a"],
+            shareCategories: null,
+            namesByIdentity: new Map<string, string>(),
+            canonicalIdentityByStoredPath: new Map([["a", "a"]]),
+            isWorkspaced: true,
+        };
+        expect(candidateTokens).toBeGreaterThan((budget - wrapperTokens) / identities.length);
+        const tokenSpy = spyOn(formatting, "estimateTokens");
+        try {
+            const result = trimWorkspaceMemoriesToBudgetV2(SESSION_ID, [memory], budget, workspace, { sourceNameByMemoryId });
+            expect(result.selected).toEqual([memory]);
+            expect(tokenSpy.mock.calls.filter(([text]) => text === line)).toHaveLength(1);
+        } finally {
+            tokenSpy.mockRestore();
+        }
     });
 
     it("measures the complete grouped block so a dropped category has no tag overhead", () => {
