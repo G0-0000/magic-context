@@ -160,6 +160,7 @@ pub(crate) fn resolved_mural(input: Option<&M0MuralInput>) -> Option<M0MuralBloc
 fn memory_selection_order(
     left: &mc_store::StoredMemory,
     right: &mc_store::StoredMemory,
+    line_tokens: &HashMap<i64, usize>,
 ) -> Ordering {
     let left_permanent = left.status == "permanent";
     let right_permanent = right.status == "permanent";
@@ -172,29 +173,36 @@ fn memory_selection_order(
         .into_iter()
         .chain(right.verified_at)
         .max();
-    let importance_order = right
-        .importance
-        .unwrap_or(i32::MIN)
-        .cmp(&left.importance.unwrap_or(i32::MIN));
-    if importance_order != Ordering::Equal {
-        return importance_order;
+    let score_order = memory_selection_score(right, line_tokens[&right.id])
+        .cmp(&memory_selection_score(left, line_tokens[&left.id]));
+    if score_order != Ordering::Equal {
+        return score_order;
     }
     match (left_reinforced_at, right_reinforced_at) {
         (None, None) => left.id.cmp(&right.id),
         (None, Some(_)) => Ordering::Greater,
         (Some(_), None) => Ordering::Less,
-        (Some(left_at), Some(right_at)) => right_at.cmp(&left_at),
+        (Some(left_at), Some(right_at)) => right_at.cmp(&left_at).then_with(|| left.id.cmp(&right.id)),
     }
+}
+
+fn memory_selection_score(memory: &mc_store::StoredMemory, tokens: usize) -> i32 {
+    let base = match memory.category.as_str() {
+        "OPS_RULES" => 80, "ENV_STATE" | "CONFIG_VALUES" => 65,
+        "INCIDENTS" => 50, "MODEL_KNOWLEDGE" => 40, _ => 30,
+    };
+    let bonus = memory.importance.map(|value| ((value as f64 / 4.0).round() as i32).clamp(0, 25)).unwrap_or(0);
+    let penalty = match tokens { 0..=96 => 0, 97..=128 => 1, 129..=160 => 3, 161..=192 => 5, 193..=256 => 8, 257..=384 => 12, 385..=512 => 16, 513..=768 => 20, _ => 25 };
+    base + bonus - penalty
 }
 
 fn memory_candidate_cost(
     memory: &mc_store::StoredMemory,
     categories: &HashSet<String>,
-    source_names: &HashMap<i64, String>,
+    line_tokens: &HashMap<i64, usize>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> f64 {
-    let line = render_memory_line(memory, source_names.get(&memory.id).map(String::as_str));
-    let mut total = estimate_tokens(&(line + "\n"));
+    let mut total = line_tokens[&memory.id];
     if !categories.contains(&memory.category) {
         total += estimate_tokens(&format!("<{}>\n</{}>\n", memory.category, memory.category));
     }
@@ -210,13 +218,13 @@ fn admit_memory(
     categories: &mut HashSet<String>,
     used: &mut f64,
     budget: f64,
-    source_names: &HashMap<i64, String>,
+    line_tokens: &HashMap<i64, usize>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> bool {
     if selected_ids.contains(&memory.id) {
         return false;
     }
-    let candidate_cost = memory_candidate_cost(&memory, categories, source_names, estimate_tokens);
+    let candidate_cost = memory_candidate_cost(&memory, categories, line_tokens, estimate_tokens);
     if *used + candidate_cost > budget {
         return false;
     }
@@ -229,8 +237,8 @@ fn admit_memory(
 }
 
 /// Select the same grouped-block candidates as TypeScript: permanent memories first,
-/// then importance and latest re-observation/verification descending, with id only when
-/// both recency timestamps are absent. Workspace renders additionally reserve an equal floor for each
+/// then composite score, latest re-observation/verification, and id. Workspace renders
+/// additionally reserve an equal floor for each
 /// member before filling leftovers.
 pub(crate) fn trim_memories_to_budget(
     memories: Vec<mc_store::StoredMemory>,
@@ -246,8 +254,12 @@ pub(crate) fn trim_memories_to_budget(
     let mut used = wrapper_cost as f64;
     let mut categories = HashSet::<String>::new();
 
+    let line_tokens: HashMap<i64, usize> = memories.iter().map(|memory| {
+        let line = render_memory_line(memory, source_names.get(&memory.id).map(String::as_str));
+        (memory.id, estimate_tokens(&(line + "\n")))
+    }).collect();
     let mut ordered = memories;
-    ordered.sort_by(memory_selection_order);
+    ordered.sort_by(|left, right| memory_selection_order(left, right, &line_tokens));
     if let Some(workspace) = membership {
         for memory in ordered.iter().filter(|memory| memory.status == "permanent") {
             let mut ignored = 0.0;
@@ -259,7 +271,7 @@ pub(crate) fn trim_memories_to_budget(
                 &mut categories,
                 &mut used,
                 budget,
-                source_names,
+                &line_tokens,
                 estimate_tokens,
             );
         }
@@ -271,7 +283,7 @@ pub(crate) fn trim_memories_to_budget(
                 .filter(|memory| memory.project_path == *identity && memory.status != "permanent")
             {
                 let candidate_cost =
-                    memory_candidate_cost(memory, &categories, source_names, estimate_tokens);
+                    memory_candidate_cost(memory, &categories, &line_tokens, estimate_tokens);
                 if member_used + candidate_cost > floor {
                     continue;
                 }
@@ -283,7 +295,7 @@ pub(crate) fn trim_memories_to_budget(
                     &mut categories,
                     &mut used,
                     budget,
-                    source_names,
+                    &line_tokens,
                     estimate_tokens,
                 );
             }
@@ -298,7 +310,7 @@ pub(crate) fn trim_memories_to_budget(
                 &mut categories,
                 &mut used,
                 budget,
-                source_names,
+                &line_tokens,
                 estimate_tokens,
             );
         }
@@ -313,7 +325,7 @@ pub(crate) fn trim_memories_to_budget(
                 &mut categories,
                 &mut used,
                 budget,
-                source_names,
+                &line_tokens,
                 estimate_tokens,
             );
         }
@@ -731,9 +743,10 @@ mod tests {
         let estimate = |text: &str| text.len();
         let categories = HashSet::new();
         let sources = HashMap::new();
+        let line_tokens = [&never_verified, &verified_yesterday].into_iter().map(|memory| (memory.id, estimate(&(render_memory_line(memory, None) + "\n")))).collect();
         let budget = estimate("<project-memory>\n</project-memory>")
-            + memory_candidate_cost(&never_verified, &categories, &sources, estimate).max(
-                memory_candidate_cost(&verified_yesterday, &categories, &sources, estimate),
+            + memory_candidate_cost(&never_verified, &categories, &line_tokens, estimate).max(
+                memory_candidate_cost(&verified_yesterday, &categories, &line_tokens, estimate),
             ) as usize;
 
         let selected = trim_memories_to_budget(
@@ -748,6 +761,46 @@ mod tests {
             selected.iter().map(|memory| memory.id).collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    #[test]
+    fn selection_score_boundaries_and_order() {
+        let mut memory = mc_store::StoredMemory { category: "RESEARCH".into(), status: "active".into(), ..Default::default() };
+        for (category, base) in [("OPS_RULES", 80), ("ENV_STATE", 65), ("CONFIG_VALUES", 65), ("INCIDENTS", 50), ("MODEL_KNOWLEDGE", 40), ("RESEARCH", 30), ("CONSTRAINTS", 30)] {
+            memory.category = category.into();
+            assert_eq!(memory_selection_score(&memory, 96), base);
+        }
+        for (tokens, penalty) in [(96, 0), (97, 1), (128, 1), (129, 3), (160, 3), (161, 5), (192, 5), (193, 8), (256, 8), (257, 12), (384, 12), (385, 16), (512, 16), (513, 20), (768, 20), (769, 25)] {
+            assert_eq!(memory_selection_score(&memory, tokens), 30 - penalty);
+        }
+        for (importance, bonus) in [(None, 0), (Some(-10), 0), (Some(1), 0), (Some(2), 1), (Some(50), 13), (Some(100), 25), (Some(500), 25)] {
+            memory.importance = importance;
+            assert_eq!(memory_selection_score(&memory, 96), 30 + bonus);
+        }
+        let mut permanent = memory.clone();
+        permanent.id = 1; permanent.status = "permanent".into(); permanent.importance = None;
+        memory.id = 2;
+        let tokens = HashMap::from([(1, 769), (2, 96)]);
+        assert_eq!(memory_selection_order(&permanent, &memory, &tokens), Ordering::Less);
+        permanent.status = "active".into(); permanent.importance = memory.importance;
+        let tokens = HashMap::from([(1, 96), (2, 96)]);
+        assert_eq!(memory_selection_order(&permanent, &memory, &tokens), Ordering::Less);
+        memory.verified_at = Some(10);
+        assert_eq!(memory_selection_order(&memory, &permanent, &tokens), Ordering::Less);
+    }
+
+    #[test]
+    fn workspace_reuses_rendered_line_count_across_probes() {
+        let memory = mc_store::StoredMemory { id: 7, category: "RESEARCH".into(), content: "fact".into(), status: "active".into(), project_path: "a".into(), ..Default::default() };
+        let workspace = mc_store::WorkspaceMembership { union_identities: vec!["a".into(), "b".into()], own_identity: "a".into(), share_categories: vec![], display_name_by_path: HashMap::new() };
+        let sources = HashMap::from([(7, "source".to_string())]);
+        let line = render_memory_line(&memory, Some("source")) + "\n";
+        let calls = std::cell::Cell::new(0);
+        let estimate = |text: &str| { if text == line { calls.set(calls.get() + 1); } text.len() };
+        let budget = estimate("<project-memory>\n</project-memory>") + line.len() + 30;
+        let selected = trim_memories_to_budget(vec![memory], Some(&workspace), &sources, budget as f64, estimate);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

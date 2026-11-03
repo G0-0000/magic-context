@@ -108,8 +108,8 @@ try {
         await measure(`MEM-12 ${size} classification ids`, () => getUnclassifiedMemoryIds(db, largeIds), 5);
     }
     samples['MEM-12 SQLite bound'] = db.prepare("SELECT compile_options FROM pragma_compile_options WHERE compile_options LIKE 'MAX_VARIABLE_NUMBER=%'").get();
-    const list = () => memoryStorage.getMemoriesForList?.(db, project.project_path, ['ARCHITECTURE'], 10) ?? getMemoriesByProject(db, project.project_path).filter(m => m.category === 'ARCHITECTURE').slice(0, 10);
-    await measure("MEM-13 list ten architecture memories", list);
+    const list = () => memoryStorage.getMemoriesForList?.(db, project.project_path, ['MODEL_KNOWLEDGE'], 10) ?? getMemoriesByProject(db, project.project_path).filter(m => m.category === 'MODEL_KNOWLEDGE').slice(0, 10);
+    await measure("MEM-13 list ten model-knowledge memories", list);
     samples['MEM-13 ordered list hash'] = hash(list());
     await measure("MEM-15 boolean list gates", () => ["evaluate-smart-notes", "review-user-memories", "refresh-primers"].map(task => evaluateTaskGate(task as Parameters<typeof evaluateTaskGate>[0], { db, projectIdentity: project.project_path, lastRunAt: null, promotionThreshold: 3 })));
     const cueStates = getMuralCueState(db, ids);
@@ -134,7 +134,7 @@ try {
         const base = git("rev-parse", "HEAD");
         const at = Number(git("show", "-s", "--format=%ct")) * 1000 + 1000;
         for (const file of files) writeFileSync(join(repo, file), "new\n");
-        const claims = files.map((file, i) => ({ id: i, category: "ARCHITECTURE", content: "claim", mappedFiles: [file], verifiedAt: at }));
+        const claims = files.map((file, i) => ({ id: i, category: "MODEL_KNOWLEDGE", content: "claim", mappedFiles: [file], verifiedAt: at }));
         await measure("MEM-6 50 memory 50 file timestamp diff", () => buildVerifyDiffEvidence(repo, claims), 3);
         await measure("MEM-7 normalize 50 tracked paths", () => normalizeVerificationFiles({ cwd: repo, files }), 3);
         await measure("MEM-8 incremental git probes", async () => { const root = (await resolveGitTopLevel(repo)) ?? repo; await readGitFileChangeTimesSince(repo, at, root); await readGitChangedFilesSince(repo, base, root); }, 3);
