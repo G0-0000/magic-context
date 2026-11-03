@@ -1,5 +1,5 @@
 export const COMPARTMENT_RENDER_EPOCH = "cre2";
-export const MEMORY_RENDER_FORMAT_EPOCH = "mre3";
+export const MEMORY_RENDER_FORMAT_EPOCH = "mre4";
 
 const EPOCH_COMPONENT_PREFIX = "|compartment-render:";
 const MEMORY_EPOCH_COMPONENT_PREFIX = "|memory-render:";
