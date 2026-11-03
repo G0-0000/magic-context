@@ -1,38 +1,28 @@
 import { describe, expect, it } from "bun:test";
-import { compareMemorySelectionPriority, type MemorySelectionCandidate } from "./memory-selection";
+import { compareMemorySelectionPriority, memoryLengthPenalty, memorySelectionScore, type MemorySelectionCandidate } from "./memory-selection";
 
-function candidate(
-    id: number,
-    importance: number | null,
-    lastSeenAt: number | null,
-): MemorySelectionCandidate {
-    return {
-        id,
-        importance: importance as number,
-        status: "active",
-        lastSeenAt,
-        verifiedAt: null,
-    } as MemorySelectionCandidate;
+function candidate(id: number, overrides: Partial<MemorySelectionCandidate> = {}): MemorySelectionCandidate {
+    return { id, category: "RESEARCH", importance: 0, status: "active", lastSeenAt: null, verifiedAt: null, lineTokens: 96, ...overrides };
 }
 
-describe("compareMemorySelectionPriority", () => {
-    it("orders memories without an importance by reinforcement recency, as the Rust module does", () => {
-        // The Rust module (m0_compose.rs memory_selection_order) ranks these [2, 3, 1]:
-        // newest reinforcement first, never-reinforced last.
-        const memories = [
-            candidate(1, null, null),
-            candidate(2, null, 200),
-            candidate(3, null, 100),
-        ];
-        expect([...memories].sort(compareMemorySelectionPriority).map((m) => m.id)).toEqual([
-            2, 3, 1,
-        ]);
+describe("memory selection scoring", () => {
+    it("uses every category base and the legacy fallback", () => {
+        for (const [category, base] of Object.entries({ OPS_RULES: 80, ENV_STATE: 65, CONFIG_VALUES: 65, INCIDENTS: 50, MODEL_KNOWLEDGE: 40, RESEARCH: 30, CONSTRAINTS: 30 })) {
+            expect(memorySelectionScore(candidate(1, { category: category as MemorySelectionCandidate["category"] }))).toBe(base);
+        }
     });
-
-    it("ranks a missing importance below every set importance", () => {
-        const memories = [candidate(1, null, 500), candidate(2, 1, null), candidate(3, 5, null)];
-        expect([...memories].sort(compareMemorySelectionPriority).map((m) => m.id)).toEqual([
-            3, 2, 1,
-        ]);
+    it("rounds and clamps importance, treating missing and non-finite values as zero", () => {
+        for (const [importance, bonus] of [[null, 0], [undefined, 0], [NaN, 0], [Infinity, 0], [-100, 0], [1, 0], [2, 1], [50, 13], [100, 25], [500, 25]] as const) {
+            expect(memorySelectionScore(candidate(1, { importance: importance as number })) - 30).toBe(bonus);
+        }
+    });
+    it("uses each inclusive length boundary", () => {
+        for (const [length, penalty] of [[96, 0], [97, 1], [128, 1], [129, 3], [160, 3], [161, 5], [192, 5], [193, 8], [256, 8], [257, 12], [384, 12], [385, 16], [512, 16], [513, 20], [768, 20], [769, 25]]) {
+            expect(memoryLengthPenalty(length)).toBe(penalty);
+        }
+    });
+    it("orders permanent, score, reinforcement, then id", () => {
+        const rows = [candidate(5), candidate(4, { lastSeenAt: 10 }), candidate(3, { verifiedAt: 10 }), candidate(2, { importance: 100 }), candidate(1, { status: "permanent", lineTokens: 1000 })];
+        expect(rows.sort(compareMemorySelectionPriority).map((row) => row.id)).toEqual([1, 2, 3, 4, 5]);
     });
 });

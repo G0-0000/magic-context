@@ -26,6 +26,10 @@ A project is identified by `git:<root commit sha>` when the directory is a git r
 
 Memories come from three writers: the historian's fact promotion (when `memory.auto_promote` is on), the agent through `ctx_memory`, and the dreamer. `ctx_memory` offers `write`, `update` (optionally with a new category), `archive`, `merge` and `get` to primary agents; `list` is reserved for dreamer tasks. Primary agents can only mutate their own project's memories. Duplicate detection on `update` is scoped to the target project, category and hash inside one immediate transaction. When `memory.enabled` is false, `ctx_memory` is not registered on OpenCode (Pi registers it but refuses for memory-off projects), memory guidance is removed from the system prompt, and every memory-derived prompt surface is suppressed.
 
+### Injection selection
+
+V2 selects permanent memories first. Within each status partition it orders by category base (`OPS_RULES` 80, `ENV_STATE` and `CONFIG_VALUES` 65, `INCIDENTS` 50, `MODEL_KNOWLEDGE` 40, `RESEARCH` and unknown categories 30), plus importance rounded after division by four and clamped to 0–25 (missing or non-finite is zero), minus a rendered-line length penalty. Token limits 96, 128, 160, 192, 256, 384, 512 and 768 carry penalties 0, 1, 3, 5, 8, 12, 16 and 20; longer lines carry 25. Ties use the newest of last observation and verification, then ascending id. The line includes the actual workspace source and newline; category headings and the wrapper remain separate budget costs. Candidates that do not fit are skipped, and workspace member floors still apply. This score does not change stored importance.
+
 ### How memories reach the prompt without a bust
 
 The baseline memory block lives in `m[0]`. Changes made during a session go through `m[1]`:
