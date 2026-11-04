@@ -559,6 +559,7 @@ function assertProjectAllowed(directory: string, allowHomeProject: boolean): voi
 export function resolveProjectIdentity(
     directory: string,
     allowHomeProject = homeProjectPermission,
+    options: { cache?: boolean } = {},
 ): string {
     assertProjectAllowed(directory, allowHomeProject);
     const canonical = path.resolve(directory);
@@ -590,7 +591,7 @@ export function resolveProjectIdentity(
     }
 
     try {
-        return resolveProjectIdentityStrict(directory, allowHomeProject);
+        return resolveProjectIdentityStrict(directory, allowHomeProject, options);
     } catch (error) {
         if (error instanceof ProjectIdentityError && shouldUseDirectoryFallback(error)) {
             // Do not cache unborn fallbacks: the first commit must switch the identity to git:.
@@ -617,9 +618,10 @@ export function resolveProjectIdentity(
 export function resolveProjectIdentityOrFallback(
     directory: string,
     allowHomeProject = homeProjectPermission,
+    options: { cache?: boolean } = {},
 ): string {
     try {
-        return resolveProjectIdentity(directory, allowHomeProject);
+        return resolveProjectIdentity(directory, allowHomeProject, options);
     } catch (error) {
         const canonical = path.resolve(directory);
         if (
@@ -735,6 +737,7 @@ export function isUsableProjectIdentity(identity: string | null | undefined): id
 export function resolveProjectIdentityForSession(
     directory: string,
     allowHomeProject = homeProjectPermission,
+    options: { cache?: boolean } = {},
 ): string | undefined {
     const resolvedDirectory = path.resolve(directory);
     const cacheKey = `${allowHomeProject ? "1" : "0"}\0${resolvedDirectory}`;
@@ -768,6 +771,7 @@ export function resolveProjectIdentityForSession(
             identity = resolveProjectIdentityOrFallback(
                 isUserHomeDirectory(directory) ? canonicalUserHomeDirectory() : directory,
                 allowHomeProject,
+                options,
             );
         } catch (error) {
             if (!(error instanceof ProjectIdentityError)) throw error;
