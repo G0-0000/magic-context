@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
+import { resolveProjectIdentityForSession } from "../memory/project-identity";
 import * as strataAsk from "../../../tools/ctx-search/strata-ask";
 import * as strataCache from "../../../tools/ctx-search/strata-cache";
 import { runMigrations } from "../migrations";
@@ -91,6 +92,11 @@ describe("strata-cache-maintain dream task", () => {
         mkdirSync(join(projectDir, ".cortexkit"), { recursive: true });
         const userConfig = join(xdg, "cortexkit", "magic-context.jsonc");
         const projectConfig = join(projectDir, ".cortexkit", "magic-context.jsonc");
+        // Production matches the config's declared project against the ACTUAL
+        // resolved identity of this checkout; a plain temp directory resolves
+        // to its dir: fallback, so the declaration must use that identity.
+        const identity = resolveProjectIdentityForSession(projectDir);
+        if (!identity) throw new Error("fixture project identity did not resolve");
         writeFileSync(
             userConfig,
             JSON.stringify({
@@ -102,7 +108,7 @@ describe("strata-cache-maintain dream task", () => {
                         model: CONNECTION.model,
                         slot_file: CONNECTION.slotFile,
                         prefix_path: CONNECTION.prefixPath,
-                        project: PROJECT,
+                        project: identity,
                     },
                 },
             }),
@@ -111,7 +117,7 @@ describe("strata-cache-maintain dream task", () => {
             writeFileSync(
                 projectConfig,
                 JSON.stringify({
-                    memory: { strata_ask: { enabled, project: "git:untrusted" } },
+                    memory: { strata_ask: { enabled, project: identity } },
                 }),
             );
         const previous = process.env.XDG_CONFIG_HOME;
@@ -122,14 +128,14 @@ describe("strata-cache-maintain dream task", () => {
                 openOpenCodeDb: () => null,
             });
             setProject(true);
-            expect(executor.strataCacheEnabled?.(PROJECT)).toBe(true);
+            expect(executor.strataCacheEnabled?.(identity)).toBe(true);
             expect(executor.strataCacheEnabled?.("git:untrusted")).toBe(false);
             setProject(false);
-            expect(executor.strataCacheEnabled?.(PROJECT)).toBe(false);
+            expect(executor.strataCacheEnabled?.(identity)).toBe(false);
             setProject(true);
-            expect(executor.strataCacheEnabled?.(PROJECT)).toBe(true);
+            expect(executor.strataCacheEnabled?.(identity)).toBe(true);
             writeFileSync(projectConfig, "{ invalid json");
-            expect(executor.strataCacheEnabled?.(PROJECT)).toBe(false);
+            expect(executor.strataCacheEnabled?.(identity)).toBe(false);
         } finally {
             if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
             else process.env.XDG_CONFIG_HOME = previous;

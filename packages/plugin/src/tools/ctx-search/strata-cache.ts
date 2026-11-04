@@ -58,6 +58,12 @@ export interface CacheActionResult {
     action: CacheAction;
     detail: string;
     watermark?: CacheWatermark;
+    /**
+     * True when the remote rebuild fully succeeded but persisting its
+     * completion record failed: callers must not present the previously
+     * recorded time as the completion of THIS rebuild.
+     */
+    completionRecordFailed?: boolean;
 }
 
 export type MemoryChangeEvent =
@@ -71,7 +77,12 @@ type StoredChange =
 
 type Message = { role: "system" | "user" | "assistant"; content: string };
 
-interface CacheContext {
+/**
+ * Fully resolved write context for one configured slot. Exported for the
+ * health bridge (strata-cache-health.ts); not part of the host-facing tool API.
+ * @internal
+ */
+export interface CacheContext {
     projectRoot: string;
     connection: StrataAskConnection;
     project: string;
@@ -122,7 +133,19 @@ const CACHE_LOCK_RETRY_MS = 50;
 // caller that registered in the same clock tick is seen before one is elected.
 const CACHE_LOCK_SETTLE_MS = 50;
 
-function resolveContext(projectRoot: string): CacheContext | null {
+/**
+ * Plugin-same resolution used by both the write paths and the health bridge:
+ * effective config for the directory, its project identity, the matching
+ * connection, and a usable bearer token. Null means "not a configured
+ * strata cache target" — callers must not fall back to looser resolution.
+ * Pass `{ cache: false }` for read-only diagnostics: the identity probe then
+ * never writes the durable identity sidecar (the health GET must not write).
+ * @internal
+ */
+export function resolveContext(
+    projectRoot: string,
+    options: { cache?: boolean } = {},
+): CacheContext | null {
     if (!projectRoot) return null;
     try {
         const loaded = loadPluginConfigDetailed(projectRoot, false);
@@ -130,6 +153,7 @@ function resolveContext(projectRoot: string): CacheContext | null {
         const project = resolveProjectIdentityForSession(
             projectRoot,
             loaded.config.allow_home_project,
+            options,
         );
         if (!project) return null;
         const connection = strataAskConnectionForProject(loaded.config, project);
@@ -311,6 +335,69 @@ export function pendingChangesPathFor(prefixPath: string, slotFile: string): str
 /** One maintenance completion stamp shared by every slot beside the cache lock. */
 export function maintenanceStatePathFor(prefixPath: string): string {
     return join(dirname(prefixPath), "maintenance.json");
+}
+
+/**
+ * Per-slot record of the last SUCCESSFUL full rebuild completion, one file per
+ * slot beside its ledger. Written only at the unified rebuild success exit, so
+ * the timestamp never predates the remote save/self-check/publication/
+ * consumption chain and is never moved by an append, a failed attempt, or the
+ * mirror's mtime.
+ */
+export function lastRebuildStatePathFor(prefixPath: string, slotFile: string): string {
+    return join(dirname(prefixPath), `last-rebuild.${slotKeyOf(slotFile)}.json`);
+}
+
+/**
+ * Test seam fired immediately before the completion record write, so a test
+ * can inject a write/replace failure WITHOUT destroying the original file.
+ * @internal
+ */
+let lastRebuildRecordHookForTests: (() => void) | undefined;
+export function __setLastRebuildRecordHookForTests(hook: (() => void) | undefined): void {
+    lastRebuildRecordHookForTests = hook;
+}
+
+/**
+ * Persist the completion record; returns false (without throwing) when the
+ * write itself fails so the caller can flag that the recorded time no longer
+ * describes this rebuild. The remote rebuild has already succeeded at this
+ * point — that fact must be preserved, not converted into a rebuild failure.
+ */
+function recordSuccessfulRebuild(connection: StrataAskConnection): boolean {
+    lastRebuildRecordHookForTests?.();
+    try {
+        atomicWrite(
+            lastRebuildStatePathFor(connection.prefixPath, connection.slotFile),
+            `${JSON.stringify({ rebuiltAt: new Date().toISOString() }, null, 2)}\n`,
+        );
+        return true;
+    } catch (error) {
+        log("strata-cache last-rebuild state write failed", error);
+        return false;
+    }
+}
+
+/**
+ * Last recorded successful full rebuild completion, or null when the slot was
+ * never successfully rebuilt (or the record was never written). Throws on a
+ * present-but-unreadable/corrupt record so the health view reports an error
+ * instead of silently showing "暂无记录".
+ * @internal
+ */
+export function readSuccessfulRebuildAt(prefixPath: string, slotFile: string): string | null {
+    let raw: string;
+    try {
+        raw = readFileSync(lastRebuildStatePathFor(prefixPath, slotFile), "utf8");
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+    }
+    const value = JSON.parse(raw) as { rebuiltAt?: unknown };
+    if (typeof value.rebuiltAt !== "string" || !Number.isFinite(Date.parse(value.rebuiltAt))) {
+        throw new Error("last-rebuild record is corrupt");
+    }
+    return new Date(value.rebuiltAt).toISOString();
 }
 
 function pendingPath(connection: StrataAskConnection): string {
@@ -557,10 +644,7 @@ function createLockFile(path: string, payload: string): boolean {
 }
 
 /** Register once; the same candidate retains its arrival place across every poll. */
-function registerCacheLockCandidate(
-    connection: Pick<StrataAskConnection, "prefixPath">,
-): CacheLockCandidate {
-    const directory = cacheLockDirectoryFor(connection.prefixPath);
+function registerCacheLockCandidate(directory: string): CacheLockCandidate {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     // The name keeps the wall-clock stamp as its ordering fallback; the settle
     // window uses the process-monotonic clock instead, so a clock rollback cannot
@@ -634,7 +718,7 @@ export async function withCacheLock<T>(
     connection: Pick<StrataAskConnection, "prefixPath">,
     work: () => Promise<T>,
 ): Promise<T> {
-    const candidate = registerCacheLockCandidate(connection);
+    const candidate = registerCacheLockCandidate(cacheLockDirectoryFor(connection.prefixPath));
     try {
         while (true) {
             if (tryAcquireCacheLock(candidate)) return await work();
@@ -643,6 +727,22 @@ export async function withCacheLock<T>(
     } finally {
         releaseCacheLock(candidate.path);
     }
+}
+
+/**
+ * Non-blocking probe used by the health bridge: true while any live candidate
+ * holds this prefix directory's cache lock. A missing directory is idle.
+ * @internal
+ */
+export function cacheLockIsBusy(prefixPath: string): boolean {
+    let entries: CacheLockEntry[];
+    try {
+        entries = readCacheLockEntries(cacheLockDirectoryFor(prefixPath));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+    }
+    return entries.some((entry) => !lockIsStale(entry));
 }
 
 /** Last maintenance completion, or null when there is no readable stamp. */
@@ -715,10 +815,9 @@ function isMaintenanceDeferral(outcome: MaintenanceOutcome): outcome is Maintena
     return "retryAfterMs" in outcome;
 }
 
-// No await in this loop: local registrations cannot interleave. Ledger writes
-// are not locked across processes, so the optimistic re-read incorporates them
-// except in the final stat/rename window; consolidations holding the cache lock
-// cannot interleave with each other.
+// No throw inside finally (biome noUnsafeFinally): a busy ledger returns false
+// and the loop retries, the primary error is captured, and the temp cleanup
+// error is recorded only when nothing else failed.
 function consumePending(path: string, consumed: string): void {
     if (!consumed) return;
     for (let attempt = 0; attempt < 10; attempt++) {
@@ -727,9 +826,6 @@ function consumePending(path: string, consumed: string): void {
     throw new Error("pending-changes file remained busy during consumption");
 }
 
-// No throw inside finally (biome noUnsafeFinally): a busy ledger returns false
-// and the loop retries, the primary error is captured, and the temp cleanup
-// error is recorded only when nothing else failed.
 function consumePendingAttempt(path: string, consumed: string): boolean {
     const current = readPending(path);
     if (!current.startsWith(consumed)) {
@@ -842,21 +938,34 @@ function readPrefix(connection: StrataAskConnection): Message[] | null {
     } catch {
         throw new Error("invalid prefix JSON");
     }
-    if (!Array.isArray(value) || value.length < 3 || value.length % 2 !== 1)
-        throw new Error("invalid prefix messages");
-    return value.map((item, index) => {
+    if (!isValidPrefixMessages(value)) throw new Error("invalid prefix messages");
+    return value.map((item) => ({ role: item.role, content: item.content }));
+}
+
+function isValidPrefixMessages(value: unknown): value is Message[] {
+    if (!Array.isArray(value) || value.length < 3 || value.length % 2 !== 1) return false;
+    return value.every((item, index) => {
         const role = index === 0 ? "system" : index % 2 === 1 ? "user" : "assistant";
-        if (
-            !item ||
-            typeof item !== "object" ||
-            !role ||
-            item.role !== role ||
-            typeof item.content !== "string"
-        ) {
-            throw new Error("invalid prefix messages");
-        }
-        return { role, content: item.content as string };
+        return (
+            !!item &&
+            typeof item === "object" &&
+            (item as Message).role === role &&
+            typeof (item as Message).content === "string"
+        );
     });
+}
+
+/**
+ * Structural validity of an on-disk prefix mirror, shared by the health
+ * diagnostics and the read path. Read-only.
+ * @internal
+ */
+export function isValidPrefixMirror(raw: string): boolean {
+    try {
+        return isValidPrefixMessages(JSON.parse(raw));
+    } catch {
+        return false;
+    }
 }
 
 function watermarkLine(watermark: CacheWatermark): string {
@@ -1145,6 +1254,21 @@ async function generateAndSave(
 }
 
 /**
+ * Delete this slot's status ledger before a full rebuild renders from the
+ * canonical DB. A missing file is fine; any other failure aborts the rebuild
+ * BEFORE the snapshot, so the ledger (and its recorded changes) is never lost
+ * silently.
+ */
+function unlinkLedgerForRebuild(path: string): void {
+    try {
+        unlinkSync(path);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+    }
+}
+
+/**
  * Restore this project's saved slot so the next chat reuses it as the KV prefix.
  * A missing remote slot (http_404) is the only tolerated failure: there is
  * nothing to reuse yet. Any other failure aborts, since the slot state is then
@@ -1166,6 +1290,17 @@ async function restoreSavedSlot(context: CacheContext): Promise<boolean> {
  * restore → generate → save is one atomic request; callers that restored or
  * probed the slot immediately before (maintenance, append self-check fallback)
  * clear it so one operation restores the slot exactly once.
+ *
+ * Ledger order (user-approved for every full rebuild, including the
+ * consolidation rewrite for delete/update batches): invalidate first — the
+ * pending-write marker makes the on-disk mirror unsafe for queries and forces
+ * the next pass back here — then DELETE this slot's ledger BEFORE rendering.
+ * A full rebuild renders from the canonical DB snapshot, so recorded changes
+ * are redundant from here on; events arriving during the rebuild recreate the
+ * ledger file and MUST survive to the next pass, hence no consumption at
+ * completion. On failure the marker stays, queries fall back to classic
+ * retrieval, and the next rebuild re-renders everything (including the
+ * deleted rows' changes) from the DB.
  */
 async function rebuildLocked(
     context: CacheContext,
@@ -1173,9 +1308,17 @@ async function rebuildLocked(
     restoreFirst = true,
 ): Promise<CacheActionResult> {
     const path = pendingPath(context.connection);
-    // Only events present before the DB snapshot may be consumed; events arriving
-    // while the model is running stay in the ledger for the next consolidation.
-    const pending = readPending(path);
+    // The save can succeed remotely even if its response is lost or incomplete,
+    // so the marker lands BEFORE the ledger is touched: from here until the
+    // mirror publishes, the cache is unsafe and must not be served.
+    atomicWrite(
+        pendingWritePath(context.connection.prefixPath),
+        `${JSON.stringify({ at: new Date().toISOString() })}\n`,
+    );
+    // Full rebuild reads the canonical DB: the recorded changes are about to
+    // render from the snapshot, so delete this slot's ledger up front. Only
+    // this slot's file is touched; other slots' ledgers are untouched.
+    unlinkLedgerForRebuild(path);
     const snapshot = readMemorySnapshot(context.project);
     const watermark = watermarkFor(snapshot, new Date().toISOString());
     // Rebuild/create always stamp the current templates; an old-format cache's
@@ -1198,11 +1341,6 @@ async function rebuildLocked(
     // Reuse the saved prefix inside the same request: the system message is
     // unchanged, so the rebuilt chat only pays for the new user turn. Without a
     // published prefix there is nothing to restore, so the first build skips it.
-    // The save can succeed remotely even if its response is lost or incomplete.
-    atomicWrite(
-        pendingWritePath(context.connection.prefixPath),
-        `${JSON.stringify({ at: new Date().toISOString() })}\n`,
-    );
     const prefix = await generateAndSave(
         context,
         system,
@@ -1220,9 +1358,30 @@ async function rebuildLocked(
         await selfCheck(context, watermark);
     }
     atomicWrite(context.connection.prefixPath, `${JSON.stringify(prefix, null, 2)}\n`);
-    consumePending(path, pending);
+    // Success metadata must persist BEFORE the marker clears: a published mirror
+    // with no completion record must never be presented as "ready / 暂无记录".
+    const completionRecorded = recordSuccessfulRebuild(context.connection);
+    if (!completionRecorded) {
+        // Keep the pending-write marker: the cache stays "interrupted" and the
+        // recovery pass re-renders and re-records instead of serving a mirror
+        // whose currency nothing proves. The remote rebuild itself succeeded.
+        return {
+            action: reason === "create" ? "created" : "rebuilt",
+            detail: reason,
+            watermark,
+            completionRecordFailed: true,
+        };
+    }
     unlinkPendingWrite(context.connection.prefixPath);
-    return { action: reason === "create" ? "created" : "rebuilt", detail: reason, watermark };
+    // Only now is the rebuild a success: completion record persisted BEFORE the
+    // marker cleared, stamped AFTER the remote save, self-check, and mirror
+    // publication. The ledger is NOT consumed here — rows written during the
+    // rebuild already survived in the recreated file and belong to the next pass.
+    return {
+        action: reason === "create" ? "created" : "rebuilt",
+        detail: reason,
+        watermark,
+    };
 }
 
 /**
@@ -1261,7 +1420,8 @@ function pendingWritePath(prefixPath: string): string {
     return `${prefixPath}.pending-write.json`;
 }
 
-function hasPendingWrite(prefixPath: string): boolean {
+/** @internal Exported for the health bridge's rebuilding probe. */
+export function hasPendingWrite(prefixPath: string): boolean {
     try {
         statSync(pendingWritePath(prefixPath));
         return true;
@@ -1519,7 +1679,7 @@ async function maintainLocked(context: CacheContext): Promise<CacheActionResult>
     // past an unrecorded change. A stale sidecar likewise forces a rebuild
     // even when every watermark is current: splice queries keep failing until
     // a save rewrites it. Once a day the full rebuild is the exact, cheap
-    // answer; a pending ledger (if any) is consumed by the rebuild.
+    // answer; a pending ledger (if any) is deleted by the rebuild at start.
     return rebuildLocked(context, staleSidecar ? "sidecar-stale" : "daily-compaction", false);
 }
 
