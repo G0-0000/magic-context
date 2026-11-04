@@ -1,6 +1,6 @@
 {
-  "generation": "51fb9e0781923bc690692d33de2d15fe43a3defe7de85b0a373d673a39bceebf",
-  "catalog_digest": "51fb9e0781923bc690692d33de2d15fe43a3defe7de85b0a373d673a39bceebf",
+  "generation": "e035e74e2e39d0754ff27b7f4b6efa2e4b438a339e5fbef546182c42403b3ef4",
+  "catalog_digest": "e035e74e2e39d0754ff27b7f4b6efa2e4b438a339e5fbef546182c42403b3ef4",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -148,7 +148,7 @@
       "capabilities": [
         "magic-context:archive.search/v1"
       ],
-      "description": "Search the archive — everything that ever happened here. Classic retrieval returns only what is not on your desk: memories not in <project-memory>, compacted conversation, commits, notes. Phrase query as a natural-language question carrying the exact terms you expect (\"where is the opencode source code path?\", \"why did we choose SQLite over postgres?\", \"how does the dreamer lease work?\") — a keyword stack finds less. Sources (omit for all): memory (rules, conventions), message (compacted conversation; hits carry ordinals for ctx_expand), git_commit (when did this change), primer (reusable project Q&A the dreamer distils from recurring questions), note (parked follow-ups). Memory ids alone (`#7234`) resolve directly. from/to restrict every source to an inclusive UTC date range. Bare queries may return a synthesized memory-cache answer when the project enables it (cites #ids, NOT subject to the already-visible filter; when ctx_memory is available, ctx_memory get reads those originals). Explicit sources/from/to/limit/id queries always run classic retrieval. The classic path is unchanged.",
+      "description": "Search the archive. Classic retrieval filters memories already in <project-memory> and the live tail. Phrase query as a natural-language question with expected terms. Sources (omit for all): memory (rules), message (compacted conversation; ordinals for ctx_expand), git_commit (commits), primer (project Q&A), note (follow-ups). Memory ids alone resolve directly; from/to restrict all sources to inclusive UTC dates.\nWhen enabled on OpenCode/Pi, queries without sources and sources containing memory plus other sources may synthesize memory and selected non-memory summaries; memory may already be visible. Mixed sources query classic with memory removed before synthesis. sources:[\"memory\"] queries the bank directly (miss is terminal). Sources without memory (including []), from/to, and id use classic; limit still routes to the cache and bounds only classic material and the fallback, not the synthesized answer. The Rust module's own ctx_search always uses classic retrieval.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "88861b9bf5531278ca1e6a03034636eb6b386bb426e6ed59f3a48b3f44ad9507",
+    "preflight_digest": "78a3fb8927f9765c2a55fe573510fdc81ea72625c1c4fedd72c5ca7138a429dc",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

@@ -27,24 +27,18 @@ import {
 import { parseSearchDateRange, SearchDateRangeError } from "./date-range";
 import {
     hasUnsafeStrataCache,
+    mixedSourcesAnswer,
     readStrataStatusDocument,
     STRATA_ASK_FOOTER,
     STRATA_ASK_MISS,
     strataRouteFor,
     tryStrataAskDetailed,
+    VALID_SOURCES,
 } from "./strata-ask";
 import { buildTransientMaterial } from "./transient-material";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
 export { CTX_SEARCH_LIGHT_DESCRIPTION } from "../light-descriptions";
-
-const VALID_SOURCES: ReadonlySet<CtxSearchSource> = new Set([
-    "memory",
-    "message",
-    "git_commit",
-    "primer",
-    "note",
-]);
 
 function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit) || limit === 0) {
@@ -297,6 +291,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             const answer = await tryStrataAskDetailed({
                                 query,
                                 config: activeConnection,
+                                db: deps.db,
                                 signal: toolContext.abort,
                                 statusDocument: readStatus,
                             });
@@ -317,7 +312,9 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         // falls back to the FULL classic search, memories
                         // included.
                         const classic = await runClassic({
-                            sources: ["git_commit", "primer", "note", "message"],
+                            sources: args.sources?.filter((source) => source !== "memory") ?? [
+                                "git_commit", "primer", "note", "message",
+                            ],
                         });
                         if (!classic.ok) return classic.text;
                         let transient: string | undefined;
@@ -345,11 +342,15 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         const answer = await tryStrataAskDetailed({
                             query,
                             config: activeConnection,
+                            db: deps.db,
                             signal: toolContext.abort,
                             transient,
+                            allowExternalRefs: true,
                             statusDocument: readStatus,
                         });
-                        if (answer.status === "answered") return answer.text;
+                        if (answer.status === "answered") {
+                            return args.sources ? mixedSourcesAnswer(answer.text) : answer.text;
+                        }
                         if (
                             answer.status === "failed" &&
                             ["status_unavailable", "http_409", "http_400"].includes(answer.reason)

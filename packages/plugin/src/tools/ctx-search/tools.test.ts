@@ -24,7 +24,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { statusChangesPathFor } from "./flow-render";
-import { resolveOpenCodeStrataAsk, STRATA_ASK_FOOTER } from "./strata-ask";
+import { resolveOpenCodeStrataAsk, STRATA_ASK_FOOTER, STRATA_ASK_T4 } from "./strata-ask";
 import { createCtxSearchTools } from "./tools";
 
 const toolContext = (sessionID = "ses-search", directory?: string) =>
@@ -811,6 +811,101 @@ describe("createCtxSearchTools", () => {
             }
         });
 
+        it("fuses selected mixed sources and preserves them on fallback", async () => {
+            const evidence = insertMemory(db, { projectPath: "/repo/project", category: "RESEARCH", content: "真实记忆 | 内容" });
+            db.prepare("INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)").run("ses-search", JSON.stringify([evidence.id]));
+            const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async (_db, _session, _project, _query, options) => [{
+                source: "message", content: options?.sources?.includes("memory") ? "full archive marker" : "selected archive marker", score: 1,
+                messageOrdinal: 3, messageId: "m3", role: "user",
+            }]);
+            let mode: "hit" | "miss" | "json-miss" | "invalid" | "failed" | "400" | "409" = "hit";
+            let requests = 0;
+            let content = "";
+            const server = Bun.serve({
+                port: 0, hostname: "127.0.0.1",
+                async fetch(req) {
+                    requests++;
+                    content = ((await req.json()) as { messages: Array<{ content: string }> }).messages[0]!.content;
+                    if (mode === "failed" || mode === "400" || mode === "409") {
+                        return new Response(null, { status: mode === "failed" ? 404 : Number(mode) });
+                    }
+                    return Response.json({
+                        choices: [{ message: { content: mode === "hit" ? JSON.stringify({ answer: "融合答案", memoryIds: [evidence.id], externalRefs: ["note:7"] }) : mode === "json-miss" ? JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: [] }) : mode === "invalid" ? "旧格式" : "记忆库中无" } }],
+                        session: { splice: { resume_ok: true } },
+                    });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-mixed-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const common = {
+                db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
+                embeddingEnabled: false, readMessages: () => [],
+            };
+            const tools = createCtxSearchTools({
+                ...common,
+                resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+            });
+            const ctx = toolContext("ses-search", "/repo/project");
+            const sources: Array<"message" | "memory" | "note"> = ["message", "memory", "note", "memory"];
+            const args = { query, sources, limit: 2 };
+            try {
+                const baseline = await createCtxSearchTools(common).ctx_search.execute(
+                    { query, sources: ["message", "note"], limit: 2 }, ctx,
+                );
+                const fullBaseline = await createCtxSearchTools(common).ctx_search.execute(args, ctx);
+                expect(baseline).toContain("selected archive marker");
+                expect(fullBaseline).toContain("full archive marker");
+                expect(baseline).not.toBe(fullBaseline);
+                spy.mockClear();
+                expect(await tools.ctx_search.execute(args, ctx)).toBe(`答案：\n融合答案\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #${evidence.id} | 真实记忆 \\| 内容 |\n${STRATA_ASK_FOOTER}（取非记忆原文时，sources 须排除 memory，例如 sources:['note']）`);
+                expect(spy).toHaveBeenCalledTimes(1);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+                expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
+                expect(content).toContain("selected archive marker");
+                expect(content).toContain(`问题：${query}`);
+                expect(args).toEqual({ query, sources: ["message", "memory", "note", "memory"], limit: 2 });
+                const beforeInvalid = requests;
+                spy.mockClear();
+                const invalid = await tools.ctx_search.execute({ query, sources: ["memory", "unknown"] } as never, ctx);
+                expect(invalid).toContain("full archive marker");
+                expect(requests).toBe(beforeInvalid);
+                expect(spy).toHaveBeenCalledTimes(1);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["memory"]);
+                for (mode of ["miss", "json-miss", "invalid", "failed"] as const) {
+                    spy.mockClear();
+                    expect(await tools.ctx_search.execute(args, ctx)).toBe(baseline);
+                    expect(spy).toHaveBeenCalledTimes(1);
+                    expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+                }
+                for (mode of ["400", "409"] as const) {
+                    rmSync(`${prefixPath}.sidecar-stale.json`, { force: true });
+                    spy.mockClear();
+                    const before = requests;
+                    expect(await tools.ctx_search.execute(args, ctx)).toBe(fullBaseline);
+                    expect(requests).toBe(before + 1);
+                    expect(spy).toHaveBeenCalledTimes(2);
+                    expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+                    expect(spy.mock.calls[1]?.[4]?.sources).toEqual(["message", "memory", "note"]);
+                    expect(spy.mock.calls[1]?.[4]?.limit).toBe(2);
+                }
+                rmSync(`${prefixPath}.sidecar-stale.json`, { force: true });
+                writeFileSync(statusChangesPathFor(prefixPath, "mc-mem-v1.bin"), "{broken\n");
+                const before = requests;
+                spy.mockClear();
+                expect(await tools.ctx_search.execute(args, ctx)).toBe(fullBaseline);
+                expect(requests).toBe(before);
+                expect(spy).toHaveBeenCalledTimes(2);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+                expect(spy.mock.calls[1]?.[4]?.sources).toEqual(["message", "memory", "note"]);
+                expect(args).toEqual({ query, sources: ["message", "memory", "note", "memory"], limit: 2 });
+            } finally {
+                spy.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
         it("pre-runs non-memory classic once, sends its materials and leaves prefix.json untouched on a bare hit", async () => {
             const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([
                 {
@@ -834,7 +929,7 @@ describe("createCtxSearchTools", () => {
                         choices: [
                             {
                                 message: {
-                                    content: "答案一行\n#1032：概括",
+                                    content: JSON.stringify({ answer: "答案一行", memoryIds: [] }),
                                     reasoning_content: "skip",
                                 },
                             },
@@ -918,7 +1013,7 @@ describe("createCtxSearchTools", () => {
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
                 expect(chatMessages[0]?.content).toBe(
-                    `问题：${query}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。`,
+                    STRATA_ASK_T4.replace("{status}", "").replace("{q}", query),
                 );
             } finally {
                 spy.mockRestore();
@@ -1134,7 +1229,7 @@ describe("createCtxSearchTools", () => {
         });
 
         it("answers or terminally misses memory-only without classic; failure falls back to memory once", async () => {
-            let mode: "answered" | "miss" | "failed" = "answered";
+            let mode: "answered" | "miss" | "json-miss" | "invalid" | "failed" = "answered";
             let chatMessages: Array<{ role: string; content: string }> = [];
             const server = Bun.serve({
                 port: 0,
@@ -1146,7 +1241,7 @@ describe("createCtxSearchTools", () => {
                     ).messages;
                     return Response.json({
                         choices: [
-                            { message: { content: mode === "miss" ? "记忆库中无" : "记忆答案" } },
+                            { message: { content: mode === "miss" ? "记忆库中无" : mode === "json-miss" ? JSON.stringify({ answer: "记忆库中无", memoryIds: [] }) : mode === "invalid" ? "旧格式" : JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } },
                         ],
                         session: { restored: { tokens: 3 } },
                     });
@@ -1191,16 +1286,22 @@ describe("createCtxSearchTools", () => {
                     { query, sources: ["memory"] },
                     ctx,
                 );
-                expect(answered).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
+                expect(answered).toBe(`答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
                 expect(chatMessages[0]?.content).toBe(
-                    `问题：${query}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。`,
+                    STRATA_ASK_T4.replace("{status}", "").replace("{q}", query),
                 );
                 mode = "miss";
                 expect(
                     await tools.ctx_search.execute({ query, sources: ["memory", "memory"] }, ctx),
                 ).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
+                mode = "json-miss";
+                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
+                mode = "invalid";
+                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(baseline);
+                expect(spy).toHaveBeenCalledTimes(1);
+                spy.mockClear();
                 mode = "failed";
                 const failed = await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx);
                 expect(failed).toBe(baseline);
@@ -1223,7 +1324,7 @@ describe("createCtxSearchTools", () => {
                     const body = (await req.json()) as { messages: Array<{ content: string }> };
                     contents.push(body.messages[0]!.content);
                     return Response.json({
-                        choices: [{ message: { content: "记忆答案" } }],
+                        choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }],
                         session: { splice: { resume_ok: true } },
                     });
                 },
@@ -1262,7 +1363,7 @@ describe("createCtxSearchTools", () => {
             try {
                 // memory-only: the status document rides along, materials never do.
                 expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(
-                    `记忆答案\n${STRATA_ASK_FOOTER}`,
+                    `答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
                 );
                 expect(spy).toHaveBeenCalledTimes(0);
                 expect(contents[0]).toContain("【近期记忆变更】");
@@ -1276,7 +1377,7 @@ describe("createCtxSearchTools", () => {
                 expect(statusPrefix.endsWith("\n\n")).toBe(true);
                 // fusion: status document, then materials, then the question.
                 expect(await tools.ctx_search.execute({ query }, ctx)).toBe(
-                    `记忆答案\n${STRATA_ASK_FOOTER}`,
+                    `答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
                 );
                 expect(spy).toHaveBeenCalledTimes(1);
                 const fused = contents[1]!;
@@ -1302,7 +1403,7 @@ describe("createCtxSearchTools", () => {
                 hostname: "127.0.0.1",
                 fetch() {
                     chatRequests++;
-                    return Response.json({ choices: [{ message: { content: "记忆答案" } }] });
+                    return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }] });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
@@ -1374,7 +1475,7 @@ describe("createCtxSearchTools", () => {
                 async fetch(req) {
                     const body = (await req.json()) as { messages: Array<{ content: string }> };
                     messages.push(body.messages[0]!.content);
-                    return Response.json({ choices: [{ message: { content: "记忆答案" } }] });
+                    return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }] });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-retained-"));
@@ -1442,9 +1543,9 @@ describe("createCtxSearchTools", () => {
                     const before = messages.length;
                     expect(
                         await routed.ctx_search.execute({ query, sources: ["memory"] }, ctx),
-                    ).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
+                    ).toBe(`答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
                     expect(await routed.ctx_search.execute({ query }, ctx)).toBe(
-                        `记忆答案\n${STRATA_ASK_FOOTER}`,
+                        `答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
                     );
                     expect(messages).toHaveLength(before + 2);
                     for (const message of messages.slice(before)) {
@@ -1610,7 +1711,7 @@ describe("createCtxSearchTools", () => {
                         (await req.json()) as { messages: Array<{ role: string; content: string }> }
                     ).messages;
                     return Response.json({
-                        choices: [{ message: { content: "限额答案" } }],
+                        choices: [{ message: { content: JSON.stringify({ answer: "限额答案", memoryIds: [] }) } }],
                         session: { splice: { resume_ok: true } },
                     });
                 },
@@ -1634,7 +1735,7 @@ describe("createCtxSearchTools", () => {
             const ctx = toolContext("ses-search", "/repo/project");
             try {
                 const fused = await tools.ctx_search.execute({ query, limit: 2 }, ctx);
-                expect(fused).toBe(`限额答案\n${STRATA_ASK_FOOTER}`);
+                expect(fused).toBe(`答案：\n限额答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
                 expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
@@ -1643,10 +1744,10 @@ describe("createCtxSearchTools", () => {
                     { query, sources: ["memory"], limit: 2 },
                     ctx,
                 );
-                expect(memoryOnly).toBe(`限额答案\n${STRATA_ASK_FOOTER}`);
+                expect(memoryOnly).toBe(`答案：\n限额答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
                 expect(chatMessages[0]?.content).toBe(
-                    `问题：${query}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。`,
+                    STRATA_ASK_T4.replace("{status}", "").replace("{q}", query),
                 );
             } finally {
                 spy.mockRestore();
@@ -1691,6 +1792,9 @@ describe("createCtxSearchTools", () => {
                 await tools.ctx_search.execute({ query, from: "2026-01-01" }, ctx);
                 await tools.ctx_search.execute({ query, to: "2026-02-01" }, ctx);
                 await tools.ctx_search.execute({ query: "#1035" }, ctx);
+                await tools.ctx_search.execute({ query, sources: ["memory", "note"], from: "2026-01-01" }, ctx);
+                await tools.ctx_search.execute({ query, sources: ["memory", "note"], to: "2026-02-01" }, ctx);
+                await tools.ctx_search.execute({ query: "#1035", sources: ["memory", "note"] }, ctx);
                 expect(calls).toBe(0);
                 expect(resolved).toBe(0);
             } finally {
