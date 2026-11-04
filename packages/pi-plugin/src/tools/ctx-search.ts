@@ -45,6 +45,7 @@ import {
 	STRATA_ASK_MISS,
 	hasUnsafeStrataCache,
 	isStrataConfigResolutionFailure,
+	mixedSourcesAnswer,
 	readStrataStatusDocument,
 	strataAskConnectionForProject,
 	strataRouteFor,
@@ -353,6 +354,7 @@ export function createCtxSearchTool(
 							const answer = await tryStrataAskDetailed({
 								query,
 								config: connection,
+								db: deps.db,
 								signal,
 							});
 							if (answer.status === "answered") return wrap(answer.text);
@@ -368,7 +370,7 @@ export function createCtxSearchTool(
 						// carry at all fails the query to the FULL classic search instead —
 						// memories included (see below).
 						const classic = await runClassic({
-							sources: ["git_commit", "primer", "note", "message"],
+							sources: params.sources?.filter((source) => source !== "memory") ?? ["git_commit", "primer", "note", "message"],
 						});
 						if (!classic.ok) return wrap(classic.text, true);
 						let transient: string | undefined;
@@ -393,10 +395,14 @@ export function createCtxSearchTool(
 						const answer = await tryStrataAskDetailed({
 							query,
 							config: connection,
+							db: deps.db,
 							signal,
 							transient,
+							allowExternalRefs: true,
 						});
-						if (answer.status === "answered") return wrap(answer.text);
+						if (answer.status === "answered") {
+							return wrap(params.sources ? mixedSourcesAnswer(answer.text) : answer.text);
+						}
 						// The pre-run never searched memories and is not authoritative
 						// without the ledger's changes, so an unavailable status means
 						// full classic retrieval — memories included — answers this query.
