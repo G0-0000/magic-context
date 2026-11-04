@@ -439,6 +439,113 @@ describe("createCtxSearchTool", () => {
 		}
 	});
 
+	it("fuses selected mixed sources and preserves them on fallback", async () => {
+		const db = createTestDb();
+		const evidence = insertMemory(db, { projectPath: "git:pi-mixed", category: "RESEARCH", content: "真实记忆 | 内容" });
+		db.prepare("INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)").run("ses-search", JSON.stringify([evidence.id]));
+		const dir = mkdtempSync(join(tmpdir(), "mc-pi-strata-mixed-"));
+		const prefixPath = join(dir, "prefix.json");
+		writeFileSync(prefixPath, JSON.stringify([
+			{ role: "system", content: "sys" },
+			{ role: "user", content: "mem" },
+			{ role: "assistant", content: "ack" },
+		]));
+		let mode: "hit" | "miss" | "json-miss" | "invalid" | "failed" | "400" | "409" = "hit";
+		let requests = 0;
+		let content = "";
+		const server = Bun.serve({
+			port: 0, hostname: "127.0.0.1",
+			async fetch(req) {
+				requests++;
+				content = ((await req.json()) as { messages: Array<{ content: string }> }).messages[0]!.content;
+				if (mode === "failed" || mode === "400" || mode === "409") {
+					return new Response(null, { status: mode === "failed" ? 404 : Number(mode) });
+				}
+				return Response.json({
+					choices: [{ message: { content: mode === "hit" ? JSON.stringify({ answer: "融合答案", memoryIds: [evidence.id], externalRefs: ["note:7"] }) : mode === "json-miss" ? JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: [] }) : mode === "invalid" ? "旧格式" : "记忆库中无" } }],
+					session: { splice: { resume_ok: true } },
+				});
+			},
+		});
+		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async (_db, _session, _project, _query, options) => [{
+			source: "message", content: options?.sources?.includes("memory") ? "full archive marker" : "selected archive marker", score: 1,
+			messageOrdinal: 3, messageId: "m3", role: "user",
+		}]);
+		const common = {
+			db, memoryEnabled: true, embeddingEnabled: false,
+			resolveProjectIdentity: () => "git:pi-mixed",
+		};
+		const tool = createCtxSearchTool({
+			...common,
+			resolveStrataAsk: () => ({
+				baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "pi-strata-key",
+				apiKeyEnv: null, model: "qwen-test", slotFile: "mc-mem-v1.bin", prefixPath,
+				project: "git:pi-mixed", maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
+				contextDocs: [], contextDocsBudgetTokens: 4000,
+			}),
+		});
+		const ctx = fakeContext("ses-search", "/repo/pi-mixed") as never;
+		const query = "where is sqlite";
+		const sources: Array<"message" | "memory" | "note"> = ["message", "memory", "note", "memory"];
+		const args = { query, sources, limit: 2 };
+		const invoke = async (target: ReturnType<typeof createCtxSearchTool>, params: typeof args) =>
+			(await target.execute("mixed", params, new AbortController().signal, undefined, ctx)).content[0]?.text;
+		try {
+			const baseline = await invoke(createCtxSearchTool(common), { query, sources: ["message", "note"], limit: 2 });
+			const fullBaseline = await invoke(createCtxSearchTool(common), args);
+			expect(baseline).toContain("selected archive marker");
+			expect(fullBaseline).toContain("full archive marker");
+			expect(baseline).not.toBe(fullBaseline);
+			spy.mockClear();
+			expect(await invoke(tool, args)).toBe(`答案：\n融合答案\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #${evidence.id} | 真实记忆 \\| 内容 |\n${STRATA_ASK_FOOTER}（取非记忆原文时，sources 须排除 memory，例如 sources:['note']）`);
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+			expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
+			expect(content).toContain("selected archive marker");
+			expect(content).toContain(`问题：${query}`);
+			expect(args).toEqual({ query, sources: ["message", "memory", "note", "memory"], limit: 2 });
+			const beforeInvalid = requests;
+			spy.mockClear();
+			const invalid = await invoke(tool, { query, sources: ["memory", "unknown"], limit: 2 } as never);
+			expect(invalid).toContain("full archive marker");
+			expect(requests).toBe(beforeInvalid);
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["memory", "unknown"]);
+			for (mode of ["miss", "json-miss", "invalid", "failed"] as const) {
+				spy.mockClear();
+				expect(await invoke(tool, args)).toBe(baseline);
+				expect(spy).toHaveBeenCalledTimes(1);
+				expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+			}
+			for (mode of ["400", "409"] as const) {
+				rmSync(`${prefixPath}.sidecar-stale.json`, { force: true });
+				spy.mockClear();
+				const before = requests;
+				expect(await invoke(tool, args)).toBe(fullBaseline);
+				expect(requests).toBe(before + 1);
+				expect(spy).toHaveBeenCalledTimes(2);
+				expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+				expect(spy.mock.calls[1]?.[4]?.sources).toEqual(sources);
+				expect(spy.mock.calls[1]?.[4]?.limit).toBe(2);
+			}
+			rmSync(`${prefixPath}.sidecar-stale.json`, { force: true });
+			writeFileSync(statusChangesPathFor(prefixPath, "mc-mem-v1.bin"), "{broken\n");
+			const before = requests;
+			spy.mockClear();
+			expect(await invoke(tool, args)).toBe(fullBaseline);
+			expect(requests).toBe(before);
+			expect(spy).toHaveBeenCalledTimes(2);
+			expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+			expect(spy.mock.calls[1]?.[4]?.sources).toEqual(sources);
+			expect(args).toEqual({ query, sources: ["message", "memory", "note", "memory"], limit: 2 });
+		} finally {
+			spy.mockRestore();
+			server.stop(true);
+			rmSync(dir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
 	it("fuses once with non-memory classic and handles memory-only answered, miss and failure", async () => {
 		const db = createTestDb();
 		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-"));
@@ -450,7 +557,7 @@ describe("createCtxSearchTool", () => {
 		]);
 		writeFileSync(prefixPath, prefix);
 		let calls = 0;
-		let mode: "hit" | "miss" | "failed" = "hit";
+		let mode: "hit" | "miss" | "json-miss" | "invalid" | "failed" = "hit";
 		let chatMessages: Array<{ role: string; content: string }> = [];
 		const server = Bun.serve({
 			port: 0, hostname: "127.0.0.1",
@@ -459,7 +566,7 @@ describe("createCtxSearchTool", () => {
 				if (mode === "failed") return new Response(null, { status: 404 });
 				chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
 				return Response.json({
-					choices: [{ message: { content: mode === "hit" ? "答案一行" : "记忆库中无", reasoning_content: "skip" } }],
+					choices: [{ message: { content: mode === "hit" ? JSON.stringify({ answer: "答案一行", memoryIds: [] }) : mode === "json-miss" ? JSON.stringify({ answer: "记忆库中无", memoryIds: [] }) : mode === "invalid" ? "旧格式" : "记忆库中无", reasoning_content: "skip" } }],
 					session: { splice: { resume_ok: true } },
 				});
 			},
@@ -471,7 +578,7 @@ describe("createCtxSearchTool", () => {
 		const fusionSources = ["git_commit", "primer", "note", "message"] as const;
 		const ctx = fakeContext("ses-search", "/repo/pi-strata") as never;
 		const invoke = async (
-			args: { query: string; sources?: Array<"memory" | "message" | "git_commit" | "primer" | "note">; limit?: number; from?: string },
+			args: { query: string; sources?: Array<"memory" | "message" | "git_commit" | "primer" | "note">; limit?: number; from?: string; to?: string },
 			resolve = true,
 		) => {
 			const tool = createCtxSearchTool({
@@ -494,7 +601,7 @@ describe("createCtxSearchTool", () => {
 			expect(calls).toBe(0);
 			spy.mockClear();
 			const hit = await invoke({ query });
-			expect(hit).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
+			expect(hit).toBe(`答案：\n答案一行\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
 			expect(chatMessages[0]?.content).toContain("sqlite archive marker");
@@ -512,29 +619,38 @@ describe("createCtxSearchTool", () => {
 			expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
 			spy.mockClear();
 			mode = "hit";
-			expect(await invoke({ query, sources: ["memory"] })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
+			expect(await invoke({ query, sources: ["memory"] })).toBe(`答案：\n答案一行\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(0);
 			expect(chatMessages[0]?.content).toBe(STRATA_ASK_T4.replace("{status}", "").replace("{q}", query));
 			mode = "miss";
 			expect(await invoke({ query, sources: ["memory", "memory"] })).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(0);
+			mode = "json-miss";
+			expect(await invoke({ query, sources: ["memory"] })).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
+			mode = "invalid";
+			expect(await invoke({ query, sources: ["memory"] })).toBe(memoryBaseline);
+			expect(spy).toHaveBeenCalledTimes(1);
+			spy.mockClear();
 			mode = "failed";
 			expect(await invoke({ query, sources: ["memory"] })).toBe(memoryBaseline);
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["memory"]);
 			mode = "hit";
 			spy.mockClear();
-			expect(await invoke({ query, limit: 2 })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
+			expect(await invoke({ query, limit: 2 })).toBe(`答案：\n答案一行\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
 			expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
-			expect(await invoke({ query, sources: ["memory"], limit: 2 })).toBe(`答案一行\n${STRATA_ASK_FOOTER}`);
+			expect(await invoke({ query, sources: ["memory"], limit: 2 })).toBe(`答案：\n答案一行\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
 			expect(spy).toHaveBeenCalledTimes(1);
 			const networked = calls;
 			await invoke({ query, sources: [] });
 			await invoke({ query, sources: ["note"] });
 			await invoke({ query, from: "2026-01-01" });
 			await invoke({ query: "#1035" });
+			await invoke({ query, sources: ["memory", "note"], from: "2026-01-01" });
+			await invoke({ query, sources: ["memory", "note"], to: "2026-02-01" });
+			await invoke({ query: "#1035", sources: ["memory", "note"] });
 			expect(calls).toBe(networked);
 			expect(readFileSync(prefixPath, "utf8")).toBe(prefix);
 		} finally {
@@ -557,7 +673,7 @@ describe("createCtxSearchTool", () => {
 			async fetch(req) {
 				const body = (await req.json()) as { messages: Array<{ content: string }> };
 				messages.push(body.messages[0]!.content);
-				return Response.json({ choices: [{ message: { content: "记忆答案" } }] });
+				return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }] });
 			},
 		});
 		const currentDb = spyOn(storageDb, "openCurrentDatabase").mockReturnValue(db);
@@ -607,7 +723,7 @@ describe("createCtxSearchTool", () => {
 				const before = messages.length;
 				for (const params of [{ query, sources: ["memory"] as Array<"memory"> }, { query }]) {
 					const result = await routed.execute("retained", params, new AbortController().signal, undefined, ctx);
-					expect(result.content[0]?.text).toBe(`记忆答案\n${STRATA_ASK_FOOTER}`);
+					expect(result.content[0]?.text).toBe(`答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
 				}
 				expect(messages).toHaveLength(before + 2);
 				for (const message of messages.slice(before)) {

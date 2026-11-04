@@ -59,6 +59,11 @@ import {
 import { reduceLedgerRows } from "./ledger-reduce";
 import { markSidecarStale, readSidecarStale } from "./sidecar-stale";
 import PROMPTS from "./strata-prompts.json";
+import type { CtxSearchSource } from "./types";
+
+export const VALID_SOURCES: ReadonlySet<CtxSearchSource> = new Set([
+    "memory", "message", "git_commit", "primer", "note",
+]);
 
 /** Query template; copy lives in strata-prompts.json (edit there, rebuild dists). */
 export const STRATA_ASK_T4 = PROMPTS.t4;
@@ -109,6 +114,10 @@ export function sessionBlockOf(json: unknown): StrataSessionReply | null {
 
 export const STRATA_ASK_FOOTER =
     "——本答案由项目记忆缓存合成，可能融合期外材料摘要；记忆原文可按 #id 用 ctx_memory get，其余确切原文请用 ctx_expand 或显式 sources 参数";
+
+export function mixedSourcesAnswer(text: string): string {
+    return `${text}（取非记忆原文时，sources 须排除 memory，例如 sources:['note']）`;
+}
 
 /**
  * Every Strata chat call (ctx_search cache query, ACK, count self-check) asks
@@ -201,7 +210,8 @@ export function strataRouteFor(normalizedArgs: object): "fusion" | "memory-only"
     if (!("sources" in args)) return "fusion";
     if (Array.isArray(args.sources)) {
         const sources = new Set(args.sources);
-        if (sources.size === 1 && sources.has("memory")) return "memory-only";
+        if (![...sources].every((source) => VALID_SOURCES.has(source as CtxSearchSource))) return null;
+        if (sources.has("memory")) return sources.size === 1 ? "memory-only" : "fusion";
     }
     return null;
 }
@@ -413,6 +423,7 @@ function statusMemories(
     connection: StrataAskConnection,
     ids: readonly number[],
     db?: Database,
+    excludeExpired = false,
 ): Map<number, StatusMemoryView> | null {
     const memories = new Map<number, StatusMemoryView>();
     if (ids.length === 0) return memories;
@@ -430,9 +441,11 @@ function statusMemories(
         return null;
     }
     try {
+        const now = Date.now();
         for (const memory of getMemoriesByIds(handle, ids)) {
             if (memory.projectPath !== connection.project) continue;
             if (memory.status !== "active" && memory.status !== "permanent") continue;
+            if (excludeExpired && memory.expiresAt !== null && memory.expiresAt <= now) continue;
             memories.set(memory.id, memory);
         }
     } catch (error) {
@@ -757,12 +770,14 @@ interface AskRequest {
     signal?: AbortSignal;
     fetchImpl: typeof fetch;
     transient?: string;
+    allowExternalRefs?: boolean;
     /** Rendered status document; absent when the ledger carries nothing. */
     statusDocument?: string;
+    db?: Database;
 }
 
 /** `choices[0].message.content` only; `reasoning_content` never reaches the answer. */
-function outcomeOf(json: unknown): StrataAskOutcome {
+function outcomeOf(json: unknown, config: StrataAskConnection, allowExternalRefs: boolean, db?: Database): StrataAskOutcome {
     if (!json || typeof json !== "object") return fallback("invalid_reply");
     const choices = (json as { choices?: unknown }).choices;
     if (!Array.isArray(choices) || choices.length === 0) return fallback("invalid_reply");
@@ -772,7 +787,50 @@ function outcomeOf(json: unknown): StrataAskOutcome {
     if (typeof content !== "string" || content.trim().length === 0)
         return fallback("invalid_reply");
     if (isExactMiss(content)) return { status: "miss" };
-    return { status: "answered", text: `${content.trimEnd()}\n${STRATA_ASK_FOOTER}` };
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(content);
+    } catch {
+        return fallback("invalid_reply");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback("invalid_reply");
+    const reply = parsed as Record<string, unknown>;
+    if (
+        Object.keys(reply).some((key) => !["answer", "memoryIds", "externalRefs"].includes(key)) ||
+        typeof reply.answer !== "string" ||
+        /[\r\n\u2028\u2029]/u.test(reply.answer) ||
+        !reply.answer.trim() || Array.from(reply.answer.trim()).length > 50 ||
+        /(?:第[一二三四五六七八九十百零两0-9０-９]+条记忆|记忆摘要|记忆列表|记忆依据|依据记忆)\s*[:：]/u.test(reply.answer) ||
+        /[#＃]\s*[0-9０-９]+/u.test(reply.answer) ||
+        /<\s*\/?\s*(?:table|tr|th|td)(?=[\s/>])/iu.test(reply.answer) ||
+        /(?:^|\n)\s*\|[^\n]*\|/u.test(reply.answer) ||
+        /(?:^|\n)[^\n]*\|[^\n]*\n\s*\|?\s*:?-{3,}/u.test(reply.answer) ||
+        !Array.isArray(reply.memoryIds) ||
+        !reply.memoryIds.every((id: unknown) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
+        ("externalRefs" in reply && (!allowExternalRefs || !Array.isArray(reply.externalRefs) ||
+            !reply.externalRefs.every((ref: unknown) => typeof ref === "string")))
+    ) return fallback("invalid_reply");
+    const ids = [...new Set(reply.memoryIds as number[])];
+    if (reply.answer.trim() === STRATA_ASK_MISS && reply.answer !== STRATA_ASK_MISS) return fallback("invalid_reply");
+    if (reply.answer === STRATA_ASK_MISS) {
+        return ids.length === 0 && (!Array.isArray(reply.externalRefs) || reply.externalRefs.length === 0)
+            ? { status: "miss" }
+            : fallback("invalid_reply");
+    }
+    const memories = statusMemories(config, ids, db, true);
+    if (!memories) return fallback("invalid_reply");
+    const rows = ids.flatMap((id) => {
+        const memory = memories.get(id);
+        if (!memory) return [];
+        const chars = Array.from(memory.content.replace(/\s+/gu, " ").trim());
+        const excerpt = (chars.slice(0, 80).join("") + (chars.length > 80 ? "…" : ""))
+            .replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+        return [`| #${id} | ${excerpt} |`];
+    });
+    const evidence = rows.length
+        ? `| 记忆编号 | 记忆缩略 |\n| --- | --- |\n${rows.join("\n")}`
+        : "无可核验的记忆依据";
+    return { status: "answered", text: `答案：\n${reply.answer.trim()}\n\n依据记忆：\n${evidence}\n${STRATA_ASK_FOOTER}` };
 }
 
 /**
@@ -849,7 +907,7 @@ async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
         return fallback(chat.reason);
     }
     logSessionObservations(chat.json);
-    return outcomeOf(chat.json);
+    return outcomeOf(chat.json, args.config, args.allowExternalRefs ?? Boolean(args.transient), args.db);
 }
 
 export function hasUnsafeStrataCache(prefixPath: string): boolean {
@@ -869,6 +927,8 @@ export async function tryStrataAskDetailed(args: {
     signal?: AbortSignal;
     fetchImpl?: typeof fetch;
     transient?: string;
+    allowExternalRefs?: boolean;
+    db?: Database;
     /**
      * How to obtain the rendered status document. A string is sent as-is; null
      * sends the turn without one; a reader is invoked inside the shared queue,
@@ -908,8 +968,10 @@ export async function tryStrataAskDetailed(args: {
             return askOnce({
                 query,
                 transient: args.transient,
+                allowExternalRefs: args.allowExternalRefs,
                 statusDocument,
                 config: args.config,
+                db: args.db,
                 signal: args.signal,
                 fetchImpl: args.fetchImpl ?? fetch,
             });
