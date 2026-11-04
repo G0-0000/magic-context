@@ -1,5 +1,6 @@
 import { describe, expect, it, jest } from "bun:test";
 import {
+    chmodSync,
     existsSync,
     mkdirSync,
     readdirSync,
@@ -34,13 +35,16 @@ import {
     composeSlotUser,
     consolidateCache,
     docsSectionOf,
+    lastRebuildStatePathFor,
     maintainCache,
     maintenanceStatePathFor,
     parseChanges,
     pendingChangesPathFor,
     rebuildCache,
+    readSuccessfulRebuildAt,
     recordMemoryChange,
     renderDocsSection,
+    __setLastRebuildRecordHookForTests,
     withCacheLock,
 } from "./strata-cache";
 import PROMPTS from "./strata-prompts.json";
@@ -531,7 +535,7 @@ function ageMaintenance(path: string): void {
 describe("rebuild and append", () => {
     for (const path of ["explicit", "daily", "stale"] as const) {
         for (const saveFailure of ["no_saved", "empty_saved"] as const) {
-            it(`retains the mirror and ledger when ${path} rebuild receives ${saveFailure}`, async () => {
+            it(`retains the mirror and start-deletes the ledger when ${path} rebuild receives ${saveFailure}`, async () => {
                 await withCacheFixture(
                     async ({
                         directory,
@@ -555,7 +559,6 @@ describe("rebuild and append", () => {
                         const updated = "updated memory";
                         updateMemoryContent(db, memory.id, updated, computeNormalizedHash(updated));
                         writeChange(pendingPath, { op: "update", id: memory.id });
-                        const ledger = readFileSync(pendingPath, "utf8");
                         if (path === "stale") markSidecarStale(prefixPath, "splice_stale");
                         ageMaintenance(maintenancePath);
                         const checks = countQuestions.length;
@@ -566,7 +569,10 @@ describe("rebuild and append", () => {
                                 : await maintainCache(directory);
                         expect(result.action).toBe("error");
                         expect(readFileSync(prefixPath, "utf8")).toBe(mirror);
-                        expect(readFileSync(pendingPath, "utf8")).toBe(ledger);
+                        // Approved order: the ledger was deleted at rebuild
+                        // START, so a failed attempt leaves it gone (the
+                        // recovery pass renders the change from the DB).
+                        expect(existsSync(pendingPath)).toBe(false);
                         expect(JSON.stringify(remoteSlot())).toBe(remote);
                         expect(countQuestions).toHaveLength(checks);
                         expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
@@ -784,7 +790,9 @@ describe("rebuild and append", () => {
                     expect(
                         JSON.parse(readFileSync(prefixPath, "utf8")) as TestMessage[],
                     ).toHaveLength(3);
-                    expect(readFileSync(pendingPath, "utf8")).toBe("");
+                    // Approved order: the recovery rebuild deleted the old ledger
+                    // at START; nothing recreated it, so there is nothing to read.
+                    expect(existsSync(pendingPath)).toBe(false);
                 },
                 [],
             );
@@ -845,7 +853,7 @@ describe("rebuild and append", () => {
         });
     });
 
-    it("does not publish a prefix or consume pending events if both checks fail", async () => {
+    it("publishes nothing when both checks fail; the start-deleted event re-renders from the DB", async () => {
         await withCacheFixture(
             async ({
                 directory,
@@ -863,12 +871,14 @@ describe("rebuild and append", () => {
                     content: "one memory",
                 });
                 writeChange(pendingPath, { op: "add", id: memory.id });
-                const pending = readFileSync(pendingPath, "utf8");
                 failNextChecks(2);
                 expect((await rebuildCache(directory, "test")).action).toBe("error");
                 expect(countQuestions).toHaveLength(2);
                 expect(existsSync(prefixPath)).toBe(false);
-                expect(readFileSync(pendingPath, "utf8")).toBe(pending);
+                // Approved order: the ledger was deleted at rebuild START, so
+                // the failed attempt leaves it gone; the recovery pass renders
+                // the event from the DB snapshot.
+                expect(existsSync(pendingPath)).toBe(false);
             },
         );
     });
@@ -1049,7 +1059,7 @@ describe("rebuild and append", () => {
             expect(result.watermark?.maxMutationId).toBe(appended.watermark?.maxMutationId);
             expect(prefixUser(prefixPath)).not.toContain("first memory");
             expect(prefixUser(prefixPath)).toContain("dreamer memory");
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+            expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1258,7 +1268,7 @@ describe("status ledger consolidation", () => {
                 expect(result.watermark?.count).toBe(1);
                 expect(prefixUser(prefixPath)).not.toContain("concurrent archived memory");
                 expect(prefixUser(prefixPath)).toContain(largeMemoryContent());
-                expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
             },
         );
     });
@@ -1293,7 +1303,7 @@ describe("status ledger consolidation", () => {
             expect(result.watermark?.count).toBe(2);
             expect(prefixUser(prefixPath)).not.toContain("old slot text");
             expect(prefixUser(prefixPath)).toContain(updated);
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1340,7 +1350,7 @@ describe("status ledger consolidation", () => {
             expect(prefixUser(prefixPath)).toContain(newContent);
             expect(prefixUser(prefixPath)).not.toContain("late add old text");
             expect(prefixUser(prefixPath)).not.toContain("late add archived text");
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1449,7 +1459,7 @@ describe("status ledger consolidation", () => {
             expect(user).not.toContain(CHANGE_LOG);
             expect(user).toContain("first memory");
             expect(user).toContain(largeMemoryContent());
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1471,20 +1481,23 @@ describe("status ledger consolidation", () => {
                     content: "first memory",
                 });
                 expect((await maintainCache(directory)).action).toBe("created");
-                // An add event whose memory is already gone renders nothing; the
-                // dead ledger may still be deleted only after a passed self-check.
+                // An add event whose memory is already gone renders nothing.
+                // The ledger is deleted at rebuild START; a failed attempt
+                // leaves it gone while the marker keeps the cache unsafe, and
+                // the recovery pass renders everything from the DB snapshot.
                 writeChange(pendingPath, { op: "add", id: 999 });
                 countQuestions.length = 0;
                 failNextChecks(2);
                 const failed = await consolidateCache(directory);
                 expect(failed.action).toBe("error");
-                expect(readFileSync(pendingPath, "utf8")).not.toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
+                expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
 
                 const consumed = await consolidateCache(directory);
                 expect(consumed.action).toBe("rebuilt");
                 expect(consumed.detail).toBe("pending-write");
                 expect(countQuestions.length).toBeGreaterThanOrEqual(2);
-                expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
                 expect(prefixUser(prefixPath)).toContain("first memory");
             },
         );
@@ -1513,7 +1526,7 @@ describe("status ledger consolidation", () => {
             const user = prefixUser(prefixPath);
             expect(user).not.toContain("first memory");
             expect(user.split("\n").at(-1)).toStartWith("本库共 0 条");
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1542,7 +1555,7 @@ describe("status ledger consolidation", () => {
             expect(result.detail).toBe("snapshot-mismatch");
             expect(result.watermark?.count).toBe(1);
             expect(prefixUser(prefixPath)).toContain(restored);
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1574,7 +1587,7 @@ describe("status ledger consolidation", () => {
             expect(result.watermark?.count).toBe(2);
             expect(prefixUser(prefixPath)).toContain(restored);
             expect(prefixUser(prefixPath)).toContain(largeMemoryContent());
-            expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
         });
     });
 
@@ -1636,7 +1649,7 @@ describe("status ledger consolidation", () => {
                 expect(result.detail).toBe("pending-write");
                 expect(prefixUser(prefixPath)).not.toContain("saved before failed check");
                 expect(prefixUser(prefixPath)).toContain(largeMemoryContent());
-                expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
                 const remote = JSON.stringify(remoteSlot());
                 expect(remote).not.toContain("saved before failed check");
                 expect(remote).toContain(largeMemoryContent());
@@ -1668,7 +1681,7 @@ describe("status ledger consolidation", () => {
                 expect(result.action).toBe("rebuilt");
                 expect(result.detail).toBe("snapshot-mismatch");
                 expect(result.watermark?.count).toBe(1);
-                expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
                 expect(countQuestions).toHaveLength(1);
                 const user = prefixUser(prefixPath);
                 expect(user).toContain("first memory");
@@ -1851,7 +1864,9 @@ describe("status ledger consolidation", () => {
                 chatBodies.length = 0;
                 onNextCheck(() => {
                     expect(existsSync(marker)).toBe(true);
-                    expect(readFileSync(pendingPath, "utf8")).not.toBe("");
+                    // Approved order: the recovery rebuild deleted the old
+                    // ledger at START, so nothing is left to read mid-check.
+                    expect(existsSync(pendingPath)).toBe(false);
                 });
                 expect((await consolidateCache(directory)).detail).toBe("pending-write");
                 expect(
@@ -1864,14 +1879,14 @@ describe("status ledger consolidation", () => {
                         .join("\n")
                         .split(largeMemoryContent()),
                 ).toHaveLength(2);
-                expect(readFileSync(pendingPath, "utf8")).toBe("");
+                expect(existsSync(pendingPath)).toBe(false);
                 expect(existsSync(marker)).toBe(false);
             },
             [],
         );
     });
 
-    it("retains the marker if ledger consumption fails after publishing the mirror", async () => {
+    it("keeps the marker and mid-run ledger rows on a failed append; the recovery rebuild deletes them at start", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, project, db, onNextCheck }) => {
                 expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
@@ -1888,16 +1903,20 @@ describe("status ledger consolidation", () => {
                 });
                 expect((await consolidateCache(directory)).action).toBe("error");
                 expect(prefixUser(prefixPath)).toContain(largeMemoryContent());
+                // The marker survives the failed check (existing invalidation)...
                 expect(existsSync(marker)).toBe(true);
                 expect((await consolidateCache(directory)).detail).toBe("pending-write");
                 expect(existsSync(marker)).toBe(false);
-                expect(readFileSync(pendingPath, "utf8")).toBe("");
+                // The recovery full rebuild deletes the ledger at START: the
+                // row written during the failed attempt is superseded by the
+                // DB render and does not survive it.
+                expect(existsSync(pendingPath)).toBe(false);
             },
             [],
         );
     });
 
-    it("publishes nothing and keeps the ledger when the append self-check fails", async () => {
+    it("publishes nothing when the append self-check fails; the old ledger was deleted at rebuild start", async () => {
         await withCacheFixture(
             async ({
                 directory,
@@ -1923,14 +1942,15 @@ describe("status ledger consolidation", () => {
                     content: largeMemoryContent(),
                 });
                 writeChange(pendingPath, { op: "add", id: large.id });
-                const ledger = readFileSync(pendingPath, "utf8");
                 // The append's check, then the rebuild fallback's check and its docs
                 // retry: every one of them fails.
                 failNextChecks(3);
 
                 expect((await consolidateCache(directory)).action).toBe("error");
                 expect(readFileSync(prefixPath, "utf8")).toBe(published);
-                expect(readFileSync(pendingPath, "utf8")).toBe(ledger);
+                // The fallback rebuild deleted the ledger at START; its check
+                // then failed, so the file is gone (the marker stays).
+                expect(existsSync(pendingPath)).toBe(false);
                 expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
                 chatBodies.length = 0;
                 expect((await consolidateCache(directory)).detail).toBe("pending-write");
@@ -2100,7 +2120,7 @@ describe("remote slot lifecycle", () => {
         }, []);
     });
 
-    it("fails the write and keeps pending events when the server reports save_error", async () => {
+    it("fails the write when the server reports save_error; the event renders from the DB next time", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, project, db, failSaves }) => {
                 const memory = insertMemory(db, {
@@ -2109,11 +2129,11 @@ describe("remote slot lifecycle", () => {
                     content: "one memory",
                 });
                 writeChange(pendingPath, { op: "add", id: memory.id });
-                const pending = readFileSync(pendingPath, "utf8");
                 failSaves("save_error");
                 expect((await rebuildCache(directory, "test")).action).toBe("error");
                 expect(existsSync(prefixPath)).toBe(false);
-                expect(readFileSync(pendingPath, "utf8")).toBe(pending);
+                // Approved order: the ledger was deleted at rebuild START.
+                expect(existsSync(pendingPath)).toBe(false);
             },
             [],
         );
@@ -2137,14 +2157,14 @@ describe("remote slot lifecycle", () => {
                     content: "one memory",
                 });
                 writeChange(pendingPath, { op: "add", id: memory.id });
-                const ledger = readFileSync(pendingPath, "utf8");
                 failSaves("missing_sidecar");
                 expect((await rebuildCache(directory, "test")).action).toBe("error");
                 expect(remoteSlot()).not.toEqual([]);
                 expect(remoteSidecar()).toBeUndefined();
                 expect(existsSync(prefixPath)).toBe(false);
                 expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
-                expect(readFileSync(pendingPath, "utf8")).toBe(ledger);
+                // Approved order: the ledger was deleted at rebuild START.
+                expect(existsSync(pendingPath)).toBe(false);
                 expect((await consolidateCache(directory)).detail).toBe("pending-write");
                 expect(remoteSidecar()).toEqual(remoteSlot());
                 expect(prefixUser(prefixPath)).toContain("one memory");
@@ -2181,7 +2201,6 @@ describe("remote slot lifecycle", () => {
                     computeNormalizedHash("new memory"),
                 );
                 writeChange(pendingPath, { op: "update", id: memory.id });
-                const ledger = readFileSync(pendingPath, "utf8");
                 const checks = countQuestions.length;
                 failSaves("skipped_recovery");
                 expect((await rebuildCache(directory, "test")).action).toBe("error");
@@ -2190,7 +2209,8 @@ describe("remote slot lifecycle", () => {
                 expect(JSON.stringify(remoteSlot())).not.toBe(oldSidecar);
                 expect(countQuestions).toHaveLength(checks);
                 expect(readFileSync(prefixPath, "utf8")).toBe(mirror);
-                expect(readFileSync(pendingPath, "utf8")).toBe(ledger);
+                // Approved order: the ledger was deleted at rebuild START.
+                expect(existsSync(pendingPath)).toBe(false);
                 expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
                 expect(readSidecarStale(prefixPath)).toMatchObject({ reason: "skipped_recovery" });
                 expect((await consolidateCache(directory)).detail).toBe("pending-write");
@@ -2757,5 +2777,187 @@ describe("maintenance cooldown", () => {
                 jest.useRealTimers();
             }
         }, []);
+    });
+});
+
+
+describe("successful rebuild record", () => {
+    it("stamps completion only after a successful full rebuild, never on failure or append", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db, failSaves }) => {
+            expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBeNull();
+            expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
+            const first = readSuccessfulRebuildAt(prefixPath, SLOT_FILE);
+            expect(first).not.toBeNull();
+            expect(Number.isFinite(Date.parse(first as string))).toBe(true);
+            const record = JSON.parse(
+                readFileSync(lastRebuildStatePathFor(prefixPath, SLOT_FILE), "utf8"),
+            ) as { rebuiltAt?: unknown };
+            expect(record.rebuiltAt).toBe(first);
+
+            // A pure-append consolidation must not move the full-rebuild stamp.
+            const large = insertMemory(db, {
+                projectPath: project,
+                category: "OPS_RULES",
+                content: largeMemoryContent(),
+            });
+            writeChange(pendingPath, { op: "add", id: large.id });
+            expect((await consolidateCache(directory)).action).toBe("appended");
+            expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBe(first);
+
+            // A failed rebuild leaves the previous completion untouched.
+            failSaves("save_error");
+            expect((await rebuildCache(directory, "test")).action).toBe("error");
+            expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBe(first);
+        }, []);
+    }, 20_000);
+
+    it("keeps the pending-write marker when the completion record cannot be written", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, project, db }) => {
+            insertMemory(db, {
+                projectPath: project,
+                category: "OPS_RULES",
+                content: "first memory",
+            });
+            // A directory at the record path makes the state write fail (EISDIR):
+            // the mirror published but nothing can prove its currency.
+            mkdirSync(lastRebuildStatePathFor(prefixPath, SLOT_FILE), { recursive: true });
+            const result = await rebuildCache(directory, "test");
+            expect(result.action).toBe("rebuilt");
+            expect(result.completionRecordFailed).toBe(true);
+            // The marker survives: the cache is "interrupted", and the recovery
+            // pass re-renders and re-records instead of presenting the mirror
+            // as ready with no completion time.
+            expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
+        }, []);
+    }, 20_000);
+
+    it("keeps the previous completion record when the re-record fails", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, project, db }) => {
+            insertMemory(db, {
+                projectPath: project,
+                category: "OPS_RULES",
+                content: "first memory",
+            });
+            expect((await rebuildCache(directory, "first")).action).toBe("rebuilt");
+            const stamped = readSuccessfulRebuildAt(prefixPath, SLOT_FILE);
+            insertMemory(db, {
+                projectPath: project,
+                category: "OPS_RULES",
+                content: "second memory",
+            });
+            const slotDir = dirname(prefixPath);
+            // Inject a replacement-write failure (read-only directory) WITHOUT
+            // destroying the original record: the re-record fails, the old
+            // value must still be there, and the marker must stay.
+            __setLastRebuildRecordHookForTests(() => chmodSync(slotDir, 0o500));
+            try {
+                const result = await rebuildCache(directory, "second");
+                expect(result.action).toBe("rebuilt");
+                expect(result.completionRecordFailed).toBe(true);
+                expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBe(stamped);
+                expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
+            } finally {
+                __setLastRebuildRecordHookForTests(undefined);
+                chmodSync(slotDir, 0o700);
+            }
+        }, []);
+    }, 20_000);
+});
+
+
+
+describe("rebuild ledger order (user-approved: delete at rebuild start)", () => {
+    it("deletes the old ledger before rendering and renders its change from the DB", async () => {
+        await withCacheFixture(
+            async ({ directory, prefixPath, pendingPath, project, db, onNextSave }) => {
+                const memory = insertMemory(db, {
+                    projectPath: project,
+                    category: "OPS_RULES",
+                    content: "ledger row memory",
+                });
+                writeChange(pendingPath, { op: "add", id: memory.id });
+                let ledgerGoneBeforeSave = false;
+                onNextSave(() => {
+                    ledgerGoneBeforeSave = !existsSync(pendingPath);
+                });
+                expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
+                // The ledger was already gone when the save request went out:
+                // it was deleted before the DB snapshot, not consumed after.
+                expect(ledgerGoneBeforeSave).toBe(true);
+                // The change rendered from the DB snapshot, not from the ledger.
+                expect(prefixUser(prefixPath)).toContain("ledger row memory");
+                // Nothing recreated the ledger: no consumption at completion.
+                expect(existsSync(pendingPath)).toBe(false);
+            },
+            [],
+        );
+    });
+
+    it("keeps rows recorded during the rebuild in the recreated ledger", async () => {
+        await withCacheFixture(
+            async ({ directory, prefixPath, pendingPath, project, db, onNextSave }) => {
+                const before = insertMemory(db, {
+                    projectPath: project,
+                    category: "OPS_RULES",
+                    content: "before rebuild",
+                });
+                writeChange(pendingPath, { op: "add", id: before.id });
+                let lateId = 0;
+                onNextSave(() => {
+                    // Arrives after the snapshot: the memory and its row must
+                    // NOT enter this cache, and the row must survive the
+                    // rebuild (no completion-time consumption).
+                    const late = insertMemory(db, {
+                        projectPath: project,
+                        category: "OPS_RULES",
+                        content: "late memory",
+                    });
+                    lateId = late.id;
+                    recordMemoryChange(directory, { op: "add", memoryId: late.id });
+                });
+                expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
+                expect(prefixUser(prefixPath)).toContain("before rebuild");
+                expect(prefixUser(prefixPath)).not.toContain("late memory");
+                const parsed = parseChanges(readFileSync(pendingPath, "utf8"));
+                expect(parsed.changes.map((row) => row.id)).toEqual([lateId]);
+            },
+            [],
+        );
+    });
+
+    it("failure: mid-run rows survive with the marker, the old ledger is gone, completion unchanged", async () => {
+        await withCacheFixture(
+            async ({ directory, prefixPath, pendingPath, project, db, onNextSave, failSaves }) => {
+                expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
+                const stamped = readSuccessfulRebuildAt(prefixPath, SLOT_FILE);
+                const before = insertMemory(db, {
+                    projectPath: project,
+                    category: "OPS_RULES",
+                    content: "before failed rebuild",
+                });
+                writeChange(pendingPath, { op: "add", id: before.id });
+                let lateId = 0;
+                onNextSave(() => {
+                    const late = insertMemory(db, {
+                        projectPath: project,
+                        category: "OPS_RULES",
+                        content: "late during failure",
+                    });
+                    lateId = late.id;
+                    recordMemoryChange(directory, { op: "add", memoryId: late.id });
+                });
+                failSaves();
+                expect((await rebuildCache(directory, "failed")).action).toBe("error");
+                // Existing invalidation: the marker stays and the mirror stays
+                // unpublished, so the old cache is never served as current.
+                expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
+                // The pre-attempt row is gone (deleted at start); the mid-run
+                // row lives in the recreated ledger for the next pass.
+                expect(parseChanges(readFileSync(pendingPath, "utf8")).changes.map((row) => row.id)).toEqual([lateId]);
+                // The completion record still describes the last SUCCESS.
+                expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBe(stamped);
+            },
+            [],
+        );
     });
 });
