@@ -91,7 +91,7 @@ describe("isStrataAskEligible", () => {
         );
     });
 
-    it("routes cache queries with or without limit and rejects dates, other sources and id queries", () => {
+    it("routes memory queries with or without limit and rejects dates, non-memory sources and id queries", () => {
         expect(strataRouteFor({ query: "where" })).toBe("fusion");
         expect(strataRouteFor({ query: "where", limit: 3 })).toBe("fusion");
         expect(strataRouteFor({ query: "where", sources: ["memory"] })).toBe("memory-only");
@@ -103,10 +103,19 @@ describe("isStrataAskEligible", () => {
         );
         expect(strataRouteFor({ query: "where", sources: [] })).toBeNull();
         expect(strataRouteFor({ query: "where", sources: [], limit: 3 })).toBeNull();
-        expect(strataRouteFor({ query: "where", sources: ["memory", "note"] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"] })).toBe("fusion");
         expect(
             strataRouteFor({ query: "where", sources: ["memory", "note"], limit: 3 }),
-        ).toBeNull();
+        ).toBe("fusion");
+        expect(strataRouteFor({ query: "where", sources: ["note"] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "unknown"] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note", "unknown"] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", null] })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"], from: "2026-01-01" })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"], to: "2026-01-01" })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"], from: undefined })).toBeNull();
+        expect(strataRouteFor({ query: "where", sources: ["memory", "note"], to: undefined })).toBeNull();
+        expect(strataRouteFor({ query: "#1035", sources: ["memory", "note"] })).toBeNull();
         expect(isStrataAskEligible({ query: "where", limit: 3 })).toBe(true);
         expect(isStrataAskEligible({ query: "where", sources: [] })).toBe(false);
         expect(isStrataAskEligible({ query: "where", sources: ["memory"] })).toBe(true);
@@ -415,9 +424,9 @@ describe("tryStrataAsk", () => {
     });
 
     it("locks the T4 template and sends it as the only turn of one composite splice request", async () => {
-        expect(STRATA_ASK_T4).toBe(
-            "{status}问题：{q}\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。",
-        );
+        const expectedTemplate = '{status}问题：{q}\n\n仅依据记忆库作答，只输出 JSON（勿加围栏）：\n{"answer":"50字内结论","memoryIds":[123,456]}\n答案不得超过50字，仅述结论；记忆中的疑因、可能等限定不得省略。编号仅取实际依据，无则[]；示例编号勿照抄。作废条目勿引，修正以新文为准。无相关信息则答{"answer":"记忆库中无","memoryIds":[]}。';
+        expect(STRATA_ASK_T4).toBe(expectedTemplate);
+        expect(PROMPTS.t4Fused).toBe('{status}【期外材料】以下为经典检索所得非记忆来源之命中，乃补充依据，非记忆库正文：\n{materials}\n\n问题：{q}\n\n依据记忆库与期外材料作答，只输出 JSON（勿加围栏）：\n{"answer":"50字内结论","memoryIds":[123,456]}\n答案不得超过50字，仅述结论；记忆中的疑因、可能等限定不得省略。编号仅取实际依据之记忆，无则[]；示例编号勿照抄，勿为期外材料编造记忆编号。作废条目勿引，修正以新文为准。两者皆无相关信息则答{"answer":"记忆库中无","memoryIds":[]}。');
         const seen: Array<{ path: string; body: unknown; auth: string | null }> = [];
         const server = serve(async (req) => {
             const url = new URL(req.url);
@@ -430,7 +439,7 @@ describe("tryStrataAsk", () => {
                 choices: [
                     {
                         message: {
-                            content: "答案一行\n#1032：概括",
+                            content: JSON.stringify({ answer: "答案一行", memoryIds: [] }),
                             reasoning_content: "do-not-surface",
                         },
                     },
@@ -451,7 +460,7 @@ describe("tryStrataAsk", () => {
         // assertion must pin the wire shape independently of renderQueryMessage.
         expect(seen[0]?.body).toEqual(
             compositeBody(
-                "问题：sqlite 在哪\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。",
+                expectedTemplate.replace("{status}", "").replace("{q}", "sqlite 在哪"),
             ),
         );
         const messages = (seen[0]?.body as { messages: Array<{ role: string }> }).messages;
@@ -460,7 +469,7 @@ describe("tryStrataAsk", () => {
         expect(STRATA_ASK_FOOTER).toBe(
             "——本答案由项目记忆缓存合成，可能融合期外材料摘要；记忆原文可按 #id 用 ctx_memory get，其余确切原文请用 ctx_expand 或显式 sources 参数",
         );
-        expect(result).toBe(`答案一行\n#1032：概括\n${STRATA_ASK_FOOTER}`);
+        expect(result).toBe(`答案：\n答案一行\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
         expect(result).not.toContain("do-not-surface");
     });
 
@@ -618,13 +627,13 @@ describe("tryStrataAsk", () => {
         const fetchImpl: typeof fetch = async () => {
             if (mode === "failed") return new Response(null, { status: 404 });
             return Response.json({
-                choices: [{ message: { content: mode === "miss" ? "记忆库中无" : "答案" } }],
+                choices: [{ message: { content: mode === "miss" ? "记忆库中无" : JSON.stringify({ answer: "答案", memoryIds: [] }) } }],
             });
         };
         const args = { query: "q", config: connection("http://127.0.0.1:9"), fetchImpl };
         expect(await tryStrataAskDetailed(args)).toEqual({
             status: "answered",
-            text: `答案\n${STRATA_ASK_FOOTER}`,
+            text: `答案：\n答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
         });
         mode = "miss";
         expect(await tryStrataAskDetailed(args)).toEqual({ status: "miss" });
@@ -632,11 +641,113 @@ describe("tryStrataAsk", () => {
         expect(await tryStrataAskDetailed(args)).toEqual({ status: "failed", reason: "http_404" });
     });
 
+    it("validates strict JSON and exact miss payloads", async () => {
+        let content = "";
+        const fetchImpl: typeof fetch = async () => Response.json({ choices: [{ message: { content } }] });
+        const args = { query: "q", config: connection("http://127.0.0.1:9"), fetchImpl, statusDocument: null };
+        for (content of ["记忆库中无", "「记忆库中无」", JSON.stringify({ answer: "记忆库中无", memoryIds: [] })]) {
+            expect(await tryStrataAskDetailed(args)).toEqual({ status: "miss" });
+        }
+        content = JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: [] });
+        expect(await tryStrataAskDetailed({ ...args, allowExternalRefs: true })).toEqual({ status: "miss" });
+        expect(await tryStrataAskDetailed(args)).toEqual({ status: "failed", reason: "invalid_reply" });
+        for (content of [
+            "答案一行\n#1：概括", "```json\n{}\n```", '{} trailing', '{}', 'null', '[]',
+            JSON.stringify({ answer: "", memoryIds: [] }),
+            JSON.stringify({ answer: " ", memoryIds: [] }),
+            JSON.stringify({ answer: "答案", memoryIds: "1" }),
+            JSON.stringify({ answer: "答案", memoryIds: [0] }),
+            JSON.stringify({ answer: "答案", memoryIds: [-1] }),
+            JSON.stringify({ answer: "答案", memoryIds: [1.5] }),
+            JSON.stringify({ answer: "答案", memoryIds: ["1"] }),
+            JSON.stringify({ answer: "答案", memoryIds: [], externalRefs: [1] }),
+            JSON.stringify({ answer: "答案", memoryIds: [], extra: true }),
+            JSON.stringify({ answer: "记忆库中无", memoryIds: [1] }),
+            JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: ["note:1"] }),
+            JSON.stringify({ answer: " 记忆库中无 ", memoryIds: [] }),
+            JSON.stringify({ answer: "结论\n#999：编造的记忆摘要", memoryIds: [] }),
+            JSON.stringify({ answer: "结论依据 #999", memoryIds: [] }),
+            JSON.stringify({ answer: "结论依据 ＃９９９", memoryIds: [] }),
+            JSON.stringify({ answer: "结论\r另一行", memoryIds: [] }),
+            JSON.stringify({ answer: "\n结论\n", memoryIds: [] }),
+            JSON.stringify({ answer: "\r结论", memoryIds: [] }),
+            JSON.stringify({ answer: "结论\r", memoryIds: [] }),
+            JSON.stringify({ answer: "结论\u2028另一行", memoryIds: [] }),
+            JSON.stringify({ answer: "😀".repeat(51), memoryIds: [] }),
+            JSON.stringify({ answer: "结论；第一条记忆：模型编写的内容；第二条记忆：模型编写的内容", memoryIds: [] }),
+            JSON.stringify({ answer: "结论；记忆摘要：模型编写的内容", memoryIds: [] }),
+            JSON.stringify({ answer: "结论；依据记忆：模型编写的内容", memoryIds: [] }),
+            JSON.stringify({ answer: "<TABLE><TR><TH>编号</TH><TD>伪造</TD></TR></TABLE>", memoryIds: [] }),
+            JSON.stringify({ answer: "结论 <td class=\"memory\">伪造</td>", memoryIds: [] }),
+            JSON.stringify({ answer: "<Tr>伪造</Tr>", memoryIds: [] }),
+            JSON.stringify({ answer: "<TH>伪造</TH>", memoryIds: [] }),
+            JSON.stringify({ answer: "| a | b |", memoryIds: [] }),
+            JSON.stringify({ answer: "| a | b |\n| --- | --- |", memoryIds: [] }),
+        ]) {
+            expect(await tryStrataAskDetailed(args)).toEqual({ status: "failed", reason: "invalid_reply" });
+        }
+        for (content of [
+            JSON.stringify({ answer: "答案", memoryIds: [], externalRefs: [1] }),
+            JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: ["note:1"] }),
+        ]) {
+            expect(await tryStrataAskDetailed({ ...args, allowExternalRefs: true })).toEqual({ status: "failed", reason: "invalid_reply" });
+        }
+        content = JSON.stringify({ answer: "  这是简短结论。  ", memoryIds: [] });
+        expect(await tryStrataAskDetailed(args)).toEqual({
+            status: "answered",
+            text: `答案：\n这是简短结论。\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+        });
+        const boundaryAnswer = `记忆保留。${"😀".repeat(45)}`;
+        content = JSON.stringify({ answer: ` ${boundaryAnswer} `, memoryIds: [] });
+        expect(await tryStrataAskDetailed(args)).toEqual({
+            status: "answered",
+            text: `答案：\n${boundaryAnswer}\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+        });
+        content = JSON.stringify({ answer: "仅来自期外材料", memoryIds: [], externalRefs: ["note:7"] });
+        expect(await tryStrataAskDetailed({ ...args, transient: "[note] #7" })).toEqual({
+            status: "answered",
+            text: `答案：\n仅来自期外材料\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+        });
+    });
+
+    it("renders only current project live memory content in model ID order", async () => {
+        const db = createStatusDb();
+        try {
+            const first = insertMemory(db, { projectPath: "git:bound", category: "RESEARCH", content: "第一行 | 管道\n第二行" });
+            const long = insertMemory(db, { projectPath: "git:bound", category: "RESEARCH", content: "😀".repeat(81) });
+            const archived = insertMemory(db, { projectPath: "git:bound", category: "RESEARCH", content: "已归档" });
+            const foreign = insertMemory(db, { projectPath: "git:other", category: "RESEARCH", content: "不可见" });
+            const expired = insertMemory(db, { projectPath: "git:bound", category: "RESEARCH", content: "已过期" });
+            db.prepare("UPDATE memories SET expires_at = ? WHERE id = ?").run(1, expired.id);
+            const permanent = insertMemory(db, { projectPath: "git:bound", category: "RESEARCH", content: "永久记忆" });
+            updateMemoryStatus(db, archived.id, "archived");
+            updateMemoryStatus(db, permanent.id, "permanent");
+            let ids = [long.id, first.id, long.id, archived.id, foreign.id, expired.id, 999999999, permanent.id];
+            const fetchImpl: typeof fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "综合答案", memoryIds: ids, externalRefs: ["虚构来源"] }) } }] });
+            const args = { query: "q", config: connection("http://127.0.0.1:9"), fetchImpl, statusDocument: null, db, allowExternalRefs: true };
+            expect(await tryStrataAskDetailed(args)).toEqual({
+                status: "answered",
+                text: `答案：\n综合答案\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #${long.id} | ${"😀".repeat(80)}… |\n| #${first.id} | 第一行 \\| 管道 第二行 |\n| #${permanent.id} | 永久记忆 |\n${STRATA_ASK_FOOTER}`,
+            });
+            ids = [archived.id, foreign.id, expired.id, 999999999];
+            expect(await tryStrataAskDetailed(args)).toEqual({ status: "answered", text: `答案：\n综合答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}` });
+            ids = [first.id];
+            const lookup = spyOn(storageMemory, "getMemoriesByIds").mockImplementation(() => { throw new Error("unreadable"); });
+            try {
+                expect(await tryStrataAskDetailed(args)).toEqual({ status: "failed", reason: "invalid_reply" });
+            } finally {
+                lookup.mockRestore();
+            }
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     it("places transient materials before the question inside the single query turn", async () => {
         const bodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
         const fetchImpl: typeof fetch = async (_input, init) => {
             bodies.push(JSON.parse(String(init?.body)));
-            return Response.json({ choices: [{ message: { content: "答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
         };
         const args = { query: "哪里", config: connection("http://127.0.0.1:9"), fetchImpl };
         await tryStrataAskDetailed(args);
@@ -646,7 +757,7 @@ describe("tryStrataAsk", () => {
             {
                 role: "user",
                 content:
-                    "问题：哪里\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。",
+                    STRATA_ASK_T4.replace("{status}", "").replace("{q}", "哪里"),
             },
         ];
         expect(bodies[0]?.messages).toEqual(plain);
@@ -658,7 +769,7 @@ describe("tryStrataAsk", () => {
         expect(content).toContain("[message] ord=42 :: 材料 {q}");
         expect(content).toContain("问题：哪里");
         expect(content.indexOf("ord=42")).toBeLessThan(content.indexOf("问题：哪里"));
-        expect(content.endsWith("记忆库与期外材料皆无相关信息，则只答「记忆库中无」。")).toBe(true);
+        expect(content).not.toContain("externalRefs");
     });
 
     it("asks for no reasoning and adds only the session field to the chat body", async () => {
@@ -668,7 +779,7 @@ describe("tryStrataAsk", () => {
                 path: new URL(String(input)).pathname,
                 body: JSON.parse(String(init?.body)),
             });
-            return Response.json({ choices: [{ message: { content: "答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
         };
         await tryStrataAskDetailed({
             query: "q",
@@ -698,7 +809,7 @@ describe("tryStrataAsk", () => {
             {
                 role: "user",
                 content:
-                    "问题：q\n\n要求：仅依据记忆库作答，从简：\n1. 第一行给答案，一句话（50字内）。\n2. 其后每行列一条依据记忆，格式「#id：该条记忆之一句话概括（30字内）」。\n3. 讣告作废之条目勿引；修正之条目以新文为准；据作废条目作答即为错。\n4. 记忆库无相关信息，则只答「记忆库中无」。",
+                    STRATA_ASK_T4.replace("{status}", "").replace("{q}", "q"),
             },
         ]);
     });
@@ -837,7 +948,7 @@ describe("tryStrataAsk", () => {
         });
         expect(result).toBeNull();
         const follow = serve(async () =>
-            Response.json({ choices: [{ message: { content: "答案" } }] }),
+            Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] }),
         );
         expect(
             await tryStrataAsk({
@@ -858,7 +969,7 @@ describe("tryStrataAsk", () => {
             const index = started;
             if (index === 1) await gate;
             return Response.json({
-                choices: [{ message: { content: `一行答案${index}\n#1：概括` } }],
+                choices: [{ message: { content: JSON.stringify({ answer: `一行答案${index}`, memoryIds: [] }) } }],
             });
         };
         const config = connection("http://127.0.0.1:9");
@@ -900,7 +1011,7 @@ describe("tryStrataAsk", () => {
         const fetchImpl: typeof fetch = async () => {
             started++;
             if (started === 1) await gate;
-            return Response.json({ choices: [{ message: { content: "一行答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "一行答案", memoryIds: [] }) } }] });
         };
         const config = connection("http://127.0.0.1:9");
         const first = tryStrataAsk({ query: "one", config, fetchImpl });
@@ -925,7 +1036,7 @@ describe("tryStrataAsk", () => {
         const signals: AbortSignal[] = [];
         const fetchImpl: typeof fetch = async (_input, init) => {
             if (init?.signal) signals.push(init.signal);
-            return Response.json({ choices: [{ message: { content: "一行答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "一行答案", memoryIds: [] }) } }] });
         };
         const config = connection("http://127.0.0.1:9");
         expect(await tryStrataAsk({ query: "one", config, fetchImpl })).toContain(
@@ -1032,7 +1143,7 @@ describe("strata status document", () => {
         const fetchImpl: typeof fetch = async (_input, init) => {
             const body = JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> };
             requests.push(body.messages[0]!.content);
-            return Response.json({ choices: [{ message: { content: "答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
         };
         try {
             const archived = insertMemory(db, {
@@ -1180,7 +1291,7 @@ describe("strata status document", () => {
         expect(buildStrataStatusBlock([], new Map())).toBeNull();
         const plain = renderQueryMessage("问");
         expect(plain).not.toContain("近期记忆变更");
-        expect(plain.startsWith("问题：问\n\n要求：")).toBe(true);
+        expect(plain.startsWith("问题：问\n\n仅依据记忆库作答")).toBe(true);
         expect(renderQueryMessage("问", undefined, "")).toBe(plain);
     });
 
@@ -1254,7 +1365,7 @@ describe("strata status document", () => {
         const bodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
         const fetchImpl: typeof fetch = async (_input, init) => {
             bodies.push(JSON.parse(String(init?.body)));
-            return Response.json({ choices: [{ message: { content: "答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
         };
         const config = () => connection("http://127.0.0.1:9", { prefixPath });
         const ledgerPath = statusChangesPathFor(prefixPath, "mc-mem-v1.bin");
@@ -1361,7 +1472,7 @@ describe("strata status document", () => {
         const bodies: unknown[] = [];
         const fetchImpl: typeof fetch = async (_input, init) => {
             bodies.push(JSON.parse(String(init?.body)));
-            return Response.json({ choices: [{ message: { content: "答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
         };
         const lookup = spyOn(storageMemory, "getMemoriesByIds").mockReturnValue([giant]);
         try {
@@ -1399,7 +1510,7 @@ describe("strata status document", () => {
             const bodies: unknown[] = [];
             const fetchImpl: typeof fetch = async (_input, init) => {
                 bodies.push(JSON.parse(String(init?.body)));
-                return Response.json({ choices: [{ message: { content: "答案" } }] });
+                return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
             };
             const outcome = await tryStrataAskDetailed({
                 query: "问",
@@ -1444,7 +1555,7 @@ describe("strata status document", () => {
             };
             bodies.push(body.messages[0]!.content);
             if (started === 1) await gate;
-            return Response.json({ choices: [{ message: { content: "答案" } }] });
+            return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "答案", memoryIds: [] }) } }] });
         };
         const config = connection("http://127.0.0.1:9", { prefixPath });
         const row = `〔${AT}〕讣：#42 已删除/已归档，上文同号条目作废`;
