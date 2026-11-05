@@ -799,7 +799,7 @@ function outcomeOf(json: unknown, config: StrataAskConnection, allowExternalRefs
         Object.keys(reply).some((key) => !["answer", "memoryIds", "externalRefs"].includes(key)) ||
         typeof reply.answer !== "string" ||
         /[\r\n\u2028\u2029]/u.test(reply.answer) ||
-        !reply.answer.trim() || Array.from(reply.answer.trim()).length > 50 ||
+        !reply.answer.trim() ||
         /(?:第[一二三四五六七八九十百零两0-9０-９]+条记忆|记忆摘要|记忆列表|记忆依据|依据记忆)\s*[:：]/u.test(reply.answer) ||
         /[#＃]\s*[0-9０-９]+/u.test(reply.answer) ||
         /<\s*\/?\s*(?:table|tr|th|td)(?=[\s/>])/iu.test(reply.answer) ||

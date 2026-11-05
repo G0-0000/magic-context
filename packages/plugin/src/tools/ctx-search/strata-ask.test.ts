@@ -424,9 +424,9 @@ describe("tryStrataAsk", () => {
     });
 
     it("locks the T4 template and sends it as the only turn of one composite splice request", async () => {
-        const expectedTemplate = '{status}问题：{q}\n\n仅依据记忆库作答，只输出 JSON（勿加围栏）：\n{"answer":"50字内结论","memoryIds":[123,456]}\n答案不得超过50字，仅述结论；记忆中的疑因、可能等限定不得省略。编号仅取实际依据，无则[]；示例编号勿照抄。作废条目勿引，修正以新文为准。无相关信息则答{"answer":"记忆库中无","memoryIds":[]}。';
+        const expectedTemplate = '{status}问题：{q}\n\n仅依据记忆库作答，只输出 JSON（勿加围栏）：\n{"answer":"简短结论","memoryIds":[123,456]}\n结论勿列编号或记忆摘要，保留疑因、可能等限定。编号仅取实际依据，无则[]；示例编号勿照抄。作废条目勿引，修正以新文为准。无相关信息则答{"answer":"记忆库中无","memoryIds":[]}。';
         expect(STRATA_ASK_T4).toBe(expectedTemplate);
-        expect(PROMPTS.t4Fused).toBe('{status}【期外材料】以下为经典检索所得非记忆来源之命中，乃补充依据，非记忆库正文：\n{materials}\n\n问题：{q}\n\n依据记忆库与期外材料作答，只输出 JSON（勿加围栏）：\n{"answer":"50字内结论","memoryIds":[123,456]}\n答案不得超过50字，仅述结论；记忆中的疑因、可能等限定不得省略。编号仅取实际依据之记忆，无则[]；示例编号勿照抄，勿为期外材料编造记忆编号。作废条目勿引，修正以新文为准。两者皆无相关信息则答{"answer":"记忆库中无","memoryIds":[]}。');
+        expect(PROMPTS.t4Fused).toBe('{status}【期外材料】以下为经典检索所得非记忆来源之命中，乃补充依据，非记忆库正文：\n{materials}\n\n问题：{q}\n\n依据记忆库与期外材料作答，只输出 JSON（勿加围栏）：\n{"answer":"简短结论","memoryIds":[123,456]}\n结论勿列编号或记忆摘要，保留疑因、可能等限定。编号仅取实际依据之记忆，无则[]；示例编号勿照抄，勿为期外材料编造记忆编号。作废条目勿引，修正以新文为准。两者皆无相关信息则答{"answer":"记忆库中无","memoryIds":[]}。');
         const seen: Array<{ path: string; body: unknown; auth: string | null }> = [];
         const server = serve(async (req) => {
             const url = new URL(req.url);
@@ -673,7 +673,6 @@ describe("tryStrataAsk", () => {
             JSON.stringify({ answer: "\r结论", memoryIds: [] }),
             JSON.stringify({ answer: "结论\r", memoryIds: [] }),
             JSON.stringify({ answer: "结论\u2028另一行", memoryIds: [] }),
-            JSON.stringify({ answer: "😀".repeat(51), memoryIds: [] }),
             JSON.stringify({ answer: "结论；第一条记忆：模型编写的内容；第二条记忆：模型编写的内容", memoryIds: [] }),
             JSON.stringify({ answer: "结论；记忆摘要：模型编写的内容", memoryIds: [] }),
             JSON.stringify({ answer: "结论；依据记忆：模型编写的内容", memoryIds: [] }),
@@ -703,11 +702,48 @@ describe("tryStrataAsk", () => {
             status: "answered",
             text: `答案：\n${boundaryAnswer}\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
         });
+        for (const answer of ["😀".repeat(51), "😀".repeat(200)]) {
+            content = JSON.stringify({ answer, memoryIds: [] });
+            expect(await tryStrataAskDetailed(args)).toEqual({
+                status: "answered",
+                text: `答案：\n${answer}\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+            });
+        }
         content = JSON.stringify({ answer: "仅来自期外材料", memoryIds: [], externalRefs: ["note:7"] });
         expect(await tryStrataAskDetailed({ ...args, transient: "[note] #7" })).toEqual({
             status: "answered",
             text: `答案：\n仅来自期外材料\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
         });
+    });
+
+    it("受控诊断的62字符答案经过真实解析并生成记忆表", async () => {
+        const db = createStatusDb();
+        const temp = tempPrefix();
+        const answer = "pending-write 标记单独不等于实时重建（rebuilding 判定不可仅凭该标记）；标记存在时仍须允许恢复流程。";
+        const memoryContent = "测试记忆：标记存在时允许恢复。";
+        try {
+            db.prepare(`INSERT INTO memories
+                (id, project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                .run(1231, "git:bound", "RESEARCH", memoryContent, computeNormalizedHash(memoryContent), 1, 1, 1, 1);
+            const fetchImpl: typeof fetch = async () => Response.json({
+                choices: [{ message: { content: JSON.stringify({ answer, memoryIds: [1231] }) } }],
+            });
+            expect(Array.from(answer)).toHaveLength(62);
+            expect(await tryStrataAskDetailed({
+                query: "测试问题",
+                config: connection("http://127.0.0.1:9", { prefixPath: temp.prefixPath }),
+                fetchImpl,
+                statusDocument: null,
+                db,
+            })).toEqual({
+                status: "answered",
+                text: `答案：\n${answer}\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #1231 | ${memoryContent} |\n${STRATA_ASK_FOOTER}`,
+            });
+        } finally {
+            closeQuietly(db);
+            temp.cleanup();
+        }
     });
 
     it("renders only current project live memory content in model ID order", async () => {
