@@ -2731,7 +2731,6 @@
         },
         "strata_ask": {
           "enabled": false,
-          "context_docs": [],
           "context_docs_budget_tokens": 4000,
           "max_tokens": 2048,
           "transient_budget_tokens": 2000,
@@ -2845,7 +2844,6 @@
         "strata_ask": {
           "default": {
             "enabled": false,
-            "context_docs": [],
             "context_docs_budget_tokens": 4000,
             "max_tokens": 2048,
             "transient_budget_tokens": 2000,
@@ -2907,13 +2905,6 @@
                   },
                   "prefix_path": {
                     "type": "string"
-                  },
-                  "context_docs": {
-                    "description": "User-level file paths for this target's project reference documents; supports ~/, absolute, and project-relative paths, but not globs or directories.",
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
                   }
                 },
                 "required": [
@@ -2924,17 +2915,9 @@
                 "additionalProperties": false
               }
             },
-            "context_docs": {
-              "default": [],
-              "description": "User-level project reference document file paths folded into the slot's fixed context. Supports ~/, absolute, and project-relative paths; no globs or directories. Targets may specify their own list. Project values are ignored.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
             "context_docs_budget_tokens": {
               "default": 4000,
-              "description": "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). Project values are ignored.",
+              "description": "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). The docs corpus is the single fixed file `.cortexkit/context.md` at the project's git root; symlinks are rejected and there is no path list. Project values are ignored.",
               "type": "integer",
               "minimum": 1,
               "maximum": 32768

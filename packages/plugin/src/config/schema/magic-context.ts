@@ -1228,8 +1228,7 @@ export interface MagicContextConfig {
             prefix_path?: string;
             /** Identity classic ctx_search resolves for the primary project. */
             project?: string;
-            targets?: Array<{ project: string; slot_file: string; prefix_path: string; context_docs?: string[] }>;
-            context_docs?: string[];
+            targets?: Array<{ project: string; slot_file: string; prefix_path: string }>;
             context_docs_budget_tokens: number;
             max_tokens: number;
             transient_budget_tokens: number;
@@ -1787,13 +1786,9 @@ export const MagicContextConfigSchema = z
                             project: z.string(),
                             slot_file: z.string(),
                             prefix_path: z.string(),
-                            context_docs: z.array(z.string()).optional().describe("User-level file paths for this target's project reference documents; supports ~/, absolute, and project-relative paths, but not globs or directories."),
                         })).optional().describe("User-level additional project cache targets; connection settings are shared."),
-                        context_docs: z.array(z.string()).default([]).describe(
-                            "User-level project reference document file paths folded into the slot's fixed context. Supports ~/, absolute, and project-relative paths; no globs or directories. Targets may specify their own list. Project values are ignored.",
-                        ),
                         context_docs_budget_tokens: z.number().int().min(1).max(32768).default(4000).describe(
-                            "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). Project values are ignored.",
+                            "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). The docs corpus is the single fixed file `.cortexkit/context.md` at the project's git root; symlinks are rejected and there is no path list. Project values are ignored.",
                         ),
                         max_tokens: z
                             .number()
@@ -1821,7 +1816,7 @@ export const MagicContextConfigSchema = z
                                 "User-level deadline in milliseconds for the one composite query request and for each write-side HTTP call (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
                             ),
                     })
-                    .default({ enabled: false, context_docs: [], context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 })
+                    .default({ enabled: false, context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 })
                     .describe(
                         "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity matches the primary project or an additional target; a project may set only enabled. A query is one composite POST /v1/chat/completions that carries only the new user turn plus strata_session restore and splice: the server restores the slot, splices the base from its token sidecar and answers inside one serialized turn, so timeout_ms bounds that single request and the client never replays prefix.json. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:[\"memory\"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. A splice the sidecar cannot serve (splice_stale, splice_base_seam, splice_render_mismatch) is answered through the older restore-then-replay flow, byte-identically, and leaves a rebuild marker beside prefix_path for the write side. Not sampled by live reload.",
                     ),
@@ -1834,7 +1829,7 @@ export const MagicContextConfigSchema = z
                 auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
                 subagent_inject: { enabled: true },
-                strata_ask: { enabled: false, context_docs: [], context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 },
+                strata_ask: { enabled: false, context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 },
             })
             .describe(
                 "Cross-session memory configuration. auto_search and git_commit_indexing sit here for history but work with memory.enabled false.",

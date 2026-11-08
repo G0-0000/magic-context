@@ -481,7 +481,7 @@ describe("createCtxSearchTool", () => {
 				baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "pi-strata-key",
 				apiKeyEnv: null, model: "qwen-test", slotFile: "mc-mem-v1.bin", prefixPath,
 				project: "git:pi-mixed", maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
-				contextDocs: [], contextDocsBudgetTokens: 4000,
+				contextDocsBudgetTokens: 4000,
 			}),
 		});
 		const ctx = fakeContext("ses-search", "/repo/pi-mixed") as never;
@@ -588,7 +588,7 @@ describe("createCtxSearchTool", () => {
 					baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "pi-strata-key",
 					apiKeyEnv: null, model: "qwen-test", slotFile: "mc-mem-v1.bin", prefixPath,
 					project: "git:pi-strata", maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
-					contextDocs: [], contextDocsBudgetTokens: 4000,
+					contextDocsBudgetTokens: 4000,
 				}) : () => null,
 			});
 			const result = await tool.execute("strata-call", args, new AbortController().signal, undefined, ctx);
@@ -703,7 +703,7 @@ describe("createCtxSearchTool", () => {
 					baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "pi-strata-key", apiKeyEnv: null,
 					model: "qwen-test", slotFile: "mc-mem-v1.bin", prefixPath, project,
 					maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
-					contextDocs: [], contextDocsBudgetTokens: 4000,
+					contextDocsBudgetTokens: 4000,
 				}),
 			});
 			const ctx = fakeContext("ses-search", "/repo/pi-retained") as never;
@@ -828,7 +828,6 @@ describe("createCtxSearchTool", () => {
 					maxTokens: 64,
 					timeoutMs: 1500,
 					transientBudgetTokens: 1000,
-					contextDocs: [],
 					contextDocsBudgetTokens: 4000,
 				}),
 			});
@@ -924,7 +923,7 @@ describe("createCtxSearchTool", () => {
 					baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "key", apiKeyEnv: null,
 					model: "test", slotFile: "mc-mem-v1.bin", prefixPath, project: "git:pi-strata",
 					maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
-					contextDocs: [], contextDocsBudgetTokens: 4000,
+					contextDocsBudgetTokens: 4000,
 				}),
 			});
 			const result = await tool.execute("fusion", { query }, new AbortController().signal, undefined, ctx);
@@ -993,7 +992,6 @@ describe("createCtxSearchTool", () => {
 			maxTokens: 64,
 			timeoutMs: 1500,
 			transientBudgetTokens: 1000,
-			contextDocs: [],
 			contextDocsBudgetTokens: 4000,
 		};
 		const tool = createCtxSearchTool({

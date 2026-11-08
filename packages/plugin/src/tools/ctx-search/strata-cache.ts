@@ -3,19 +3,20 @@ import {
     closeSync,
     existsSync,
     fstatSync,
+    lstatSync,
     mkdirSync,
     openSync,
     readdirSync,
     readFileSync,
     readSync,
+    realpathSync,
     renameSync,
     statSync,
     unlinkSync,
     writeFileSync,
     writeSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { loadPluginConfigDetailed } from "../../config";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { getAllActiveMemoriesForMigration } from "../../features/magic-context/memory/storage-memory";
@@ -181,103 +182,145 @@ export interface RenderedDocs {
     truncated: boolean[];
 }
 
-/** Read only at rebuild time; the token budget covers the complete rendered section. */
+// The reference-docs corpus is ONE fixed file, `.cortexkit/context.md` at the
+// project's git root. There is no configured path list: every slot for the
+// project answers from the same repository-owned document.
+const CONTEXT_DOC_RELATIVE = join(".cortexkit", "context.md");
+
+/**
+ * Git root for the supplied directory, walking up until a `.git` entry shows.
+ * `.git` is accepted as a directory OR as a file (a worktree pointer), so
+ * worktree layouts resolve like real repositories. A directory with no git
+ * metadata resolves to itself: a `dir:`-identity project keeps the doc beside
+ * the session directory.
+ *
+ * The session directory is canonicalized (realpath) BEFORE the walk: one
+ * given as a symlink into another repository's subtree must select that
+ * repository's own doc, never the outer repo's, or the wrong project's cache
+ * would be poisoned with foreign reference text. A directory that cannot be
+ * canonicalized (realpath fails — e.g. a nonexistent final segment) resolves
+ * to null: walking the raw path could skip a symlinked repository's root and
+ * land on an outer repo's .git, so it fails closed instead.
+ */
+function resolveGitRoot(startDirectory: string): string | null {
+    // A nonexistent directory has nothing to canonicalize and must NOT be
+    // walked raw: a path like /outer/link/missing, where link symlinks into
+    // another repository's subtree, would skip that repo's root and could
+    // land on the outer repo's .git. Fail closed: no doc.
+    let start: string;
+    try {
+        start = realpathSync(startDirectory);
+    } catch {
+        return null;
+    }
+    let current = start;
+    while (true) {
+        if (existsSync(join(current, ".git"))) return current;
+        const parent = dirname(current);
+        if (parent === current) return start;
+        current = parent;
+    }
+}
+
+/**
+ * The fixed context-doc file for this project, resolved WITHOUT reading it:
+ * git root from the supplied directory, then the `.cortexkit/context.md`
+ * checks. Symlinks are rejected at every component this fixed path adds —
+ * the `.cortexkit` directory AND the final file (the git-root side was
+ * canonicalized by resolveGitRoot, so no ancestor above it can be a
+ * repository-planted link either). A repository-controlled symlink must not
+ * point the corpus outside the repo. Directories and missing or stat-failing
+ * paths are rejected the same way. Null means "no reference doc".
+ */
+export function resolveContextDocFile(projectRoot: string): string | null {
+    if (!projectRoot) return null;
+    const root = resolveGitRoot(projectRoot);
+    if (!root) return null;
+    const docPath = join(root, CONTEXT_DOC_RELATIVE);
+    try {
+        if (!lstatSync(dirname(docPath)).isDirectory()) {
+            log(`strata-cache docs: skip ${docPath} (.cortexkit is not a real directory)`);
+            return null;
+        }
+        if (!lstatSync(docPath).isFile()) {
+            log(`strata-cache docs: skip ${docPath} (not a regular file)`);
+            return null;
+        }
+        return docPath;
+    } catch (error) {
+        log(`strata-cache docs: skip ${docPath}`, error);
+        return null;
+    }
+}
+
+/**
+ * Read only at rebuild time; the token budget covers the complete rendered
+ * section. A single oversized file is truncated at a newline boundary; when
+ * even the truncation label or the omission note exceeds the budget, the
+ * section is dropped entirely.
+ */
 export function renderDocsSection(
     projectRoot: string,
-    docs: readonly string[],
     budget: number,
 ): RenderedDocs | null {
-    const entries: Array<{ path: string; name: string; text: string }> = [];
-    for (const path of docs) {
-        const resolved = path.startsWith("~/")
-            ? join(homedir(), path.slice(2))
-            : isAbsolute(path)
-              ? path
-              : join(projectRoot, path);
-        try {
-            if (!statSync(resolved).isFile()) throw new Error("not a regular file");
-            entries.push({ path, name: basename(resolved), text: readFileSync(resolved, "utf8") });
-        } catch (error) {
-            log(`strata-cache docs: skip ${resolved}`, error);
-        }
+    const docPath = resolveContextDocFile(projectRoot);
+    if (!docPath) return null;
+    let text: string;
+    try {
+        text = readFileSync(docPath, "utf8");
+    } catch (error) {
+        log(`strata-cache docs: skip ${docPath}`, error);
+        return null;
     }
-    if (entries.length === 0) return null;
 
     const limit = Number.isFinite(budget) ? Math.floor(budget) : 0;
+    const name = basename(docPath);
     const sectionOf = (blocks: string[]) =>
         [`${DOCS_HEADER}\n${DOCS_NOTICE}`, ...blocks, DOCS_FOOTER].join("\n\n");
     const fits = (blocks: string[]) => estimateTokens(sectionOf(blocks)) <= limit;
-    const fullBlock = (entry: (typeof entries)[number]) => `〔${entry.name}〕\n${entry.text}`;
-    const omitted = (remaining: typeof entries) =>
-        remaining.map((entry) => `〔${entry.name}${DOCS_EMPTY_BUDGET_NOTE}〕`);
-    const allBlocks = entries.map(fullBlock);
-    if (fits(allBlocks)) {
-        return {
-            section: sectionOf(allBlocks),
-            files: entries.map((entry) => entry.path),
-            truncated: entries.map(() => false),
-        };
+    const fullBlock = `〔${name}〕\n${text}`;
+    if (fits([fullBlock])) {
+        return { section: sectionOf([fullBlock]), files: [docPath], truncated: [false] };
     }
-    if (!fits([DOCS_EMPTY_BUDGET_NOTE])) {
+    // The omission note keeps the file name: a budget that cannot even carry
+    // the truncation label still records WHICH file was left out.
+    const omissionBlock = `〔${name}${DOCS_EMPTY_BUDGET_NOTE}〕`;
+    if (!fits([omissionBlock])) {
         log("context-docs budget too small, skipped");
         return null;
     }
 
-    const blocks: string[] = [];
-    const files: string[] = [];
-    const truncated: boolean[] = [];
-    for (const [index, entry] of entries.entries()) {
-        const remaining = entries.slice(index + 1);
-        const namedNotes = omitted(remaining);
-        const full = fullBlock(entry);
-        // Reserve at least one omission note until all remaining files are loaded.
-        const reserve = remaining.length ? [DOCS_EMPTY_BUDGET_NOTE] : [];
-        if (fits([...blocks, full, ...reserve])) {
-            blocks.push(full);
-            files.push(entry.path);
-            truncated.push(false);
-            continue;
-        }
-
-        const truncatedBlock = (length: number) =>
-            `〔${entry.name}（已截断：原文 ${entry.text.length} 字符，载入 ${length} 字符）〕\n${entry.text.slice(0, length)}`;
-        let notes = namedNotes;
-        if (remaining.length && !fits([...blocks, truncatedBlock(0), ...notes])) notes = reserve;
-        if (!fits([...blocks, truncatedBlock(0), ...notes])) {
-            // The label itself does not fit: one note covers this file and all remaining files.
-            const allNotes = omitted(entries.slice(index));
-            blocks.push(...(fits([...blocks, ...allNotes]) ? allNotes : [DOCS_EMPTY_BUDGET_NOTE]));
-            break;
-        }
-
-        const boundaries = [0];
-        for (let at = entry.text.indexOf("\n"); at >= 0; at = entry.text.indexOf("\n", at + 1)) {
-            if (at + 1 < entry.text.length) boundaries.push(at + 1);
-        }
-        let low = 0;
-        let high = boundaries.length - 1;
-        let length = 0;
-        while (low <= high) {
-            const middle = Math.floor((low + high) / 2);
-            const candidate = boundaries[middle];
-            if (candidate === undefined) break;
-            if (fits([...blocks, truncatedBlock(candidate), ...notes])) {
-                length = candidate;
-                low = middle + 1;
-            } else {
-                high = middle - 1;
-            }
-        }
-        blocks.push(truncatedBlock(length), ...notes);
-        files.push(entry.path);
-        truncated.push(true);
-        break;
+    const truncatedBlock = (length: number) =>
+        `〔${name}（已截断：原文 ${text.length} 字符，载入 ${length} 字符）〕\n${text.slice(0, length)}`;
+    if (!fits([truncatedBlock(0)])) {
+        // Even the truncation label does not fit: the omission note stands in
+        // for the file. Nothing is recorded as loaded.
+        return { section: sectionOf([omissionBlock]), files: [], truncated: [] };
     }
+    const boundaries = [0];
+    for (let at = text.indexOf("\n"); at >= 0; at = text.indexOf("\n", at + 1)) {
+        if (at + 1 < text.length) boundaries.push(at + 1);
+    }
+    let low = 0;
+    let high = boundaries.length - 1;
+    let length = 0;
+    while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const candidate = boundaries[middle];
+        if (candidate === undefined) break;
+        if (fits([truncatedBlock(candidate)])) {
+            length = candidate;
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+    const blocks = [truncatedBlock(length)];
     if (!fits(blocks)) {
         log("context-docs budget too small, skipped");
         return null;
     }
-    return { section: sectionOf(blocks), files, truncated };
+    return { section: sectionOf(blocks), files: [docPath], truncated: [true] };
 }
 
 export function docsSectionOf(userContent: string): string | null {
@@ -1327,7 +1370,6 @@ async function rebuildLocked(
     const blocks = snapshot.memories.map(renderMemory).join("\n\n");
     const docs = renderDocsSection(
         context.projectRoot,
-        context.connection.contextDocs,
         context.connection.contextDocsBudgetTokens,
     );
     const user = composeSlotUser(
@@ -1663,10 +1705,13 @@ async function maintainLocked(context: CacheContext): Promise<CacheActionResult>
     const snapshot = readMemorySnapshot(context.project);
     if (!exists) {
         const estimate = estimateTokens(renderMemoryBlockV2(snapshot.memories));
+        // The small-memory creation threshold is bypassed only when the fixed
+        // context doc is actually present: an absent doc leaves the project to
+        // the memory budget alone.
         if (
             !staleSidecar &&
             estimate <= context.budget &&
-            context.connection.contextDocs.length === 0
+            resolveContextDocFile(context.projectRoot) === null
         ) {
             return { action: "skipped", detail: "below-threshold" };
         }

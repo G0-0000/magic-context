@@ -745,7 +745,6 @@ describe("createCtxSearchTools", () => {
             maxTokens: 64,
             timeoutMs: 1500,
             transientBudgetTokens: 1000,
-            contextDocs: [],
             contextDocsBudgetTokens: 4000,
         };
 
