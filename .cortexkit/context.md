@@ -27,3 +27,28 @@ Magic Context 是长会话编码代理的上下文窗口管理器：在不丢失
 - **主会话 / 子代理**：人直接工作的会话为主会话；由其他代理启动的为子代理。两者归约车道不同：主会话的重建许可来自自然 bust 或受限的执行趟，子代理的每个执行趟即是重建许可。
 - **直忆（strata_ask）**：裸 `ctx_search` 查询可由用户配置的 Strata 会话文件缓存（存盘语料）应答；写侧仅在一次完整重建时重读项目参考文档（本文件），查询侧不读本文件；但查询侧每次查询会读盘读取旁侧变更流水台账以载回尚未固化的记忆变更（台账缺失、不可读或不完整时，该次查询回落经典检索）；档之建立与每日重建由维护任务负责。
 - **记忆**：项目级事实，分五类（项目规则、架构、约束、配置值、命名）；新增经 m[1] 增量进入提示词，下次自然重建时折入 m[0]。
+
+## 俗称对照
+
+检索问答中用户惯用俗称，与档、码用词对照如下；答问时两套词可互训。
+
+| 俗称 | 档/码用词 | 释义 |
+|---|---|---|
+| 直忆 | strata_ask / save file | 以 Strata 会话文件缓存应答裸 ctx_search 查询的通道 |
+| 档 | save file / 存盘语料 | Strata 侧保存的会话文件，内含记忆库与本参考文档 |
+| 旁档 | sidecar / `*.tokens.json` | 与档同目录的令牌旁档，缺失则首次 splice 必 409 |
+| 缝合 | splice | 查询时把新消息接进已存前缀复用缓存的机制 |
+| 固化 | consolidate | 把旁侧变更流水台账里的记忆变更并入档 |
+| 台账 | 变更流水 | 记忆变更的旁侧记录，查询侧读它以载回未固化变更 |
+| 重建 | rebuild | 全量重组档语料并重读本文件；每日 8:30 维护任务执行 |
+| 建档门槛 | creation threshold | 记忆量过小不建槽的阈值；存在本参考文件可豁免 |
+| 回落 | fallback | 台账缺失或不完整时，该次查询退回经典检索 |
+| 早班 | dream 早班队列 | 每日清晨一串按时刻表运行的 dreamer 维护任务 |
+
+## 关键位置
+
+- 数据库：`~/.local/share/cortexkit/magic-context/context.db`（全宿主共用）
+- 配置：`~/.config/cortexkit/magic-context.jsonc`
+- 日志：`/tmp/pi/magic-context/magic-context.log`
+- pi 插件安装位：`~/.pi/agent/npm/node_modules/@cortexkit/pi-magic-context`
+- 工作仓：`/home/g0/magic-context/magic-context`（分支 `g0-patched`）
