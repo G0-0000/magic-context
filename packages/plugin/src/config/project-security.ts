@@ -551,7 +551,6 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         "targets",
         "max_tokens",
         "transient_budget_tokens",
-        "context_docs",
         "context_docs_budget_tokens",
         "timeout_ms",
     ] as const;
@@ -568,7 +567,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring memory.strata_ask.${removed.join("/")} from project config ` +
-                    "(security: a repository may only opt in with memory.strata_ask.enabled; endpoint, credentials, model, slot file, prefix path, bound project identity, and reference-docs list and budget are user-level).",
+                    "(security: a repository may only opt in with memory.strata_ask.enabled; endpoint, credentials, model, slot file, prefix path, bound project identity, and reference-docs budget are user-level).",
             );
         }
     }

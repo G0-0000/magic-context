@@ -162,7 +162,6 @@ export interface StrataAskConnection {
     maxTokens: number;
     timeoutMs: number;
     transientBudgetTokens: number;
-    contextDocs: string[];
     contextDocsBudgetTokens: number;
 }
 
@@ -181,9 +180,7 @@ export interface StrataAskConfigSource {
                 project: string;
                 slot_file: string;
                 prefix_path: string;
-                context_docs?: string[];
             }>;
-            context_docs?: string[];
             context_docs_budget_tokens?: number;
             max_tokens?: number;
             timeout_ms?: number;
@@ -293,9 +290,6 @@ export function strataAskConnectionFromConfig(
             raw.transient_budget_tokens <= 8192
                 ? raw.transient_budget_tokens
                 : DEFAULT_TRANSIENT_BUDGET_TOKENS,
-        contextDocs: Array.isArray(raw.context_docs)
-            ? raw.context_docs.filter((path) => typeof path === "string" && path.length > 0)
-            : [],
         contextDocsBudgetTokens:
             typeof contextDocsBudgetTokens === "number" &&
             Number.isInteger(contextDocsBudgetTokens) &&
@@ -323,7 +317,6 @@ export function strataAskConnectionForProject(
                 project: target.project,
                 slot_file: target.slot_file,
                 prefix_path: target.prefix_path,
-                context_docs: target.context_docs ?? [],
             },
         },
     });

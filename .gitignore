@@ -49,6 +49,8 @@ packages/plugin/docs/animation[0-9]*/
 !/.cortexkit/skills/
 !/.cortexkit/rules/
 !/.cortexkit/WORKER.md
+# The 直忆/strata-ask reference-doc corpus: one fixed file at the git root.
+!/.cortexkit/context.md
 
 # Prompt/model experiment harnesses (model-dispatch, replay, migration validation).
 # Kept on disk for reuse but excluded from git + CI typecheck: they intentionally

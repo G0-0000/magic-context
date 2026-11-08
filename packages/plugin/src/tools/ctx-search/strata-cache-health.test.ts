@@ -57,7 +57,6 @@ type HealthFixture = {
  */
 async function withHealthFixture(
     run: (fixture: HealthFixture) => Promise<void>,
-    docs: string[] = [],
 ): Promise<void> {
     const root = createTestTempDirFromPath(join(tmpdir(), "mc-strata-health-"));
     const directory = join(root, "project");
@@ -151,7 +150,6 @@ async function withHealthFixture(
                         project,
                         slot_file: SLOT_FILE,
                         prefix_path: prefixPath,
-                        context_docs: docs,
                         targets: [
                             {
                                 project: peerProject,
