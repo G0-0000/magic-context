@@ -77,7 +77,6 @@ function connection(
         maxTokens: 2048,
         timeoutMs: 60_000,
         transientBudgetTokens: 1000,
-        contextDocs: [],
         contextDocsBudgetTokens: 4000,
         ...patch,
     };
@@ -140,7 +139,6 @@ describe("strata ask config", () => {
             max_tokens: 2048,
             timeout_ms: 60_000,
             transient_budget_tokens: 2000,
-            context_docs: [],
             context_docs_budget_tokens: 4000,
         });
         expect(strataAskConnectionFromConfig(parsed)).toBeNull();
@@ -296,7 +294,6 @@ describe("strata ask config", () => {
                 maxTokens: 1024,
                 timeoutMs: 1500,
                 transientBudgetTokens: 2000,
-                contextDocs: [],
                 contextDocsBudgetTokens: 4000,
             });
         } finally {

@@ -174,7 +174,6 @@ describe("MagicContextConfigSchema", () => {
                         max_commits: 2000,
                     },
                     strata_ask: {
-                        context_docs: [],
                         context_docs_budget_tokens: 4000,
                         enabled: false,
                         max_tokens: 2048,

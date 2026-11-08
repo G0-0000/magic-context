@@ -6,6 +6,7 @@ import {
     readdirSync,
     readFileSync,
     rmSync,
+    symlinkSync,
     utimesSync,
     writeFileSync,
 } from "node:fs";
@@ -44,6 +45,7 @@ import {
     readSuccessfulRebuildAt,
     recordMemoryChange,
     renderDocsSection,
+    resolveContextDocFile,
     __setLastRebuildRecordHookForTests,
     withCacheLock,
 } from "./strata-cache";
@@ -64,12 +66,27 @@ function withDocs(run: (directory: string) => void): void {
     }
 }
 
+// The docs corpus is the ONE fixed file `.cortexkit/context.md` (resolved
+// against the git root, falling back to the session directory itself).
+const CONTEXT_DOC_DIR = ".cortexkit";
+const CONTEXT_DOC_NAME = "context.md";
+
+function contextDocPath(directory: string): string {
+    return join(directory, CONTEXT_DOC_DIR, CONTEXT_DOC_NAME);
+}
+
+function writeContextDoc(directory: string, content: string): void {
+    mkdirSync(join(directory, CONTEXT_DOC_DIR), { recursive: true });
+    writeFileSync(contextDocPath(directory), content);
+}
+
 describe("reference document section", () => {
     it("keeps the watermark last, puts docs after memory and before acknowledgement, and round-trips (C1, C3, C5)", () => {
         withDocs((directory) => {
             const text = `original\n\n${FOOTER}\nstill original`;
-            writeFileSync(join(directory, "guide.md"), text);
-            const docs = renderDocsSection(directory, ["guide.md"], 4000)!;
+            writeContextDoc(directory, text);
+            const docPath = contextDocPath(directory);
+            const docs = renderDocsSection(directory, 4000)!;
             const blocks = "#1 [OPS_RULES] 〔2026-10-30T00:00:00.000Z〕：\nmemory";
             const user = composeSlotUser(
                 PROMPTS.intro,
@@ -83,9 +100,9 @@ describe("reference document section", () => {
             expect(user.indexOf(docs.section)).toBeLessThan(user.indexOf(PROMPTS.ackRequest));
             expect(docs.section.startsWith(`${HEADER}\n${NOTICE}`)).toBe(true);
             expect(docs.section.endsWith(FOOTER)).toBe(true);
-            expect(docs.section).toContain(`〔guide.md〕\n${text}`);
+            expect(docs.section).toContain(`〔${CONTEXT_DOC_NAME}〕\n${text}`);
             expect(docsSectionOf(user)).toBe(docs.section);
-            expect(docs.files).toEqual(["guide.md"]);
+            expect(docs.files).toEqual([docPath]);
             expect(docs.truncated).toEqual([false]);
         });
     });
@@ -94,7 +111,7 @@ describe("reference document section", () => {
         const oldExpression = [PROMPTS.intro, "memory block", PROMPTS.ackRequest, WATERMARK]
             .filter(Boolean)
             .join("\n\n");
-        expect(renderDocsSection("/unused", [], 4000)).toBeNull();
+        expect(renderDocsSection("/unused", 4000)).toBeNull();
         expect(
             composeSlotUser(PROMPTS.intro, "memory block", null, PROMPTS.ackRequest, WATERMARK),
         ).toBe(oldExpression);
@@ -108,26 +125,131 @@ describe("reference document section", () => {
         );
     });
 
-    it("reads project-relative and absolute files in order and skips missing files and directories", () => {
+    it("renders no docs section when the fixed file is absent (a)", () => {
         withDocs((directory) => {
-            const absolute = join(directory, "second.md");
-            writeFileSync(join(directory, "first.md"), "first raw text\n");
-            writeFileSync(absolute, "second raw text");
-            const docs = renderDocsSection(
-                directory,
-                ["missing.md", "first.md", directory, absolute],
-                4000,
-            )!;
-            expect(docs.files).toEqual(["first.md", absolute]);
-            expect(docs.truncated).toEqual([false, false]);
-            expect(docs.section.indexOf("first raw text")).toBeLessThan(
-                docs.section.indexOf("second raw text"),
-            );
-            expect(renderDocsSection(directory, ["missing.md", directory], 4000)).toBeNull();
+            expect(renderDocsSection(directory, 4000)).toBeNull();
+            const nested = join(directory, "sub");
+            mkdirSync(nested, { recursive: true });
+            expect(renderDocsSection(nested, 4000)).toBeNull();
         });
     });
 
-    it("enforces the full-section budget, truncates at a line boundary and notes remaining files", () => {
+    it("rejects a symlink parked at the fixed doc path (b)", () => {
+        withDocs((directory) => {
+            const realPath = join(directory, "real.md");
+            writeFileSync(realPath, "real text");
+            mkdirSync(join(directory, CONTEXT_DOC_DIR), { recursive: true });
+            symlinkSync(realPath, contextDocPath(directory));
+            expect(resolveContextDocFile(directory)).toBeNull();
+            expect(renderDocsSection(directory, 4000)).toBeNull();
+        });
+    });
+
+    it("rejects a symlinked .cortexkit directory pointing outside the repo", () => {
+        withDocs((directory) => {
+            // The link target holds a readable doc: only the symlinked
+            // directory level must sink the read, before any bytes are read.
+            const outside = join(directory, "outside");
+            mkdirSync(outside, { recursive: true });
+            writeFileSync(join(outside, CONTEXT_DOC_NAME), "external doc text");
+            symlinkSync(outside, join(directory, CONTEXT_DOC_DIR), "dir");
+            expect(resolveContextDocFile(directory)).toBeNull();
+            expect(renderDocsSection(directory, 4000)).toBeNull();
+        });
+    });
+
+    it("skips a directory parked at the fixed doc path", () => {
+        withDocs((directory) => {
+            mkdirSync(contextDocPath(directory), { recursive: true });
+            expect(resolveContextDocFile(directory)).toBeNull();
+            expect(renderDocsSection(directory, 4000)).toBeNull();
+        });
+    });
+
+    it("resolves the doc from the git root when the session directory is nested below it (c)", () => {
+        withDocs((directory) => {
+            mkdirSync(join(directory, ".git"), { recursive: true });
+            writeContextDoc(directory, "root doc text");
+            const nested = join(directory, "packages", "plugin");
+            mkdirSync(nested, { recursive: true });
+            const docs = renderDocsSection(nested, 4000)!;
+            expect(docs.files).toEqual([contextDocPath(directory)]);
+            expect(docs.section).toContain("root doc text");
+            expect(resolveContextDocFile(nested)).toBe(contextDocPath(directory));
+        });
+    });
+
+    it("canonicalizes a relative session directory before walking up for .git", () => {
+        withDocs((directory) => {
+            mkdirSync(join(directory, ".git"), { recursive: true });
+            writeContextDoc(directory, "relative path doc text");
+            const nested = join(directory, "packages");
+            mkdirSync(nested, { recursive: true });
+            const previous = process.cwd();
+            process.chdir(directory);
+            try {
+                const docs = renderDocsSection("packages", 4000)!;
+                expect(docs.files).toEqual([contextDocPath(directory)]);
+                expect(docs.section).toContain("relative path doc text");
+                expect(resolveContextDocFile("packages")).toBe(contextDocPath(directory));
+            } finally {
+                process.chdir(previous);
+            }
+        });
+    });
+
+    it("canonicalizes a session directory symlinked into another repo's subtree before walking up", () => {
+        withDocs((directory) => {
+            // Outer repo: its doc must NOT be selected through the symlinked
+            // session directory — walking the raw path would find this .git
+            // first and poison the cache with foreign reference text.
+            mkdirSync(join(directory, ".git"), { recursive: true });
+            writeContextDoc(directory, "outer poison doc");
+            const inner = join(directory, "inner-repo");
+            const innerNested = join(inner, "sub");
+            mkdirSync(innerNested, { recursive: true });
+            writeFileSync(join(inner, ".git"), "gitdir: /elsewhere/worktrees/doc\n");
+            writeContextDoc(inner, "inner doc text");
+            const link = join(directory, "linked-session");
+            symlinkSync(innerNested, link, "dir");
+            const docs = renderDocsSection(link, 4000)!;
+            expect(docs.files).toEqual([contextDocPath(inner)]);
+            expect(docs.section).toContain("inner doc text");
+            expect(docs.section).not.toContain("outer poison doc");
+            expect(resolveContextDocFile(link)).toBe(contextDocPath(inner));
+        });
+    });
+
+    it("fails closed when a symlinked session directory ends in a nonexistent segment", () => {
+        withDocs((directory) => {
+            // Outer repo: realpath on link/missing fails (ENOENT), and
+            // walking the raw path would find this outer .git and select its
+            // doc — the wrong project's reference text. No doc must resolve.
+            mkdirSync(join(directory, ".git"), { recursive: true });
+            writeContextDoc(directory, "outer poison doc");
+            const inner = join(directory, "inner-repo");
+            const innerNested = join(inner, "sub");
+            mkdirSync(innerNested, { recursive: true });
+            writeContextDoc(inner, "inner doc text");
+            const link = join(directory, "linked-session");
+            symlinkSync(innerNested, link, "dir");
+            const sessionPath = join(link, "missing");
+            expect(resolveContextDocFile(sessionPath)).toBeNull();
+            expect(renderDocsSection(sessionPath, 4000)).toBeNull();
+        });
+    });
+
+    it("accepts a worktree layout where .git is a file (d)", () => {
+        withDocs((directory) => {
+            writeFileSync(join(directory, ".git"), "gitdir: /elsewhere/worktrees/doc\n");
+            writeContextDoc(directory, "worktree doc text");
+            const docs = renderDocsSection(directory, 4000)!;
+            expect(docs.files).toEqual([contextDocPath(directory)]);
+            expect(docs.section).toContain("worktree doc text");
+        });
+    });
+
+    it("enforces the full-section budget and truncates an over-budget file at a line boundary (e)", () => {
         withDocs((directory) => {
             const lines = Array.from(
                 { length: 80 },
@@ -135,31 +257,48 @@ describe("reference document section", () => {
             );
             const text = lines.join("");
             const fragment = lines.slice(0, 5).join("");
-            writeFileSync(join(directory, "first.md"), text);
-            writeFileSync(join(directory, "second.md"), "not loaded");
-            const sample = `${HEADER}\n${NOTICE}\n\n〔first.md（已截断：原文 ${text.length} 字符，载入 ${fragment.length} 字符）〕\n${fragment}\n\n〔second.md（未载：预算已用尽）〕\n\n${FOOTER}`;
+            writeContextDoc(directory, text);
+            const sample = `${HEADER}\n${NOTICE}\n\n〔${CONTEXT_DOC_NAME}（已截断：原文 ${text.length} 字符，载入 ${fragment.length} 字符）〕\n${fragment}\n\n${FOOTER}`;
             const budget = estimateTokens(sample);
-            const docs = renderDocsSection(directory, ["first.md", "second.md"], budget)!;
+            const docs = renderDocsSection(directory, budget)!;
             expect(estimateTokens(docs.section)).toBeLessThanOrEqual(budget);
-            expect(docs.files).toEqual(["first.md"]);
+            expect(docs.files).toEqual([contextDocPath(directory)]);
             expect(docs.truncated).toEqual([true]);
-            const label = /〔first\.md（已截断：原文 (\d+) 字符，载入 (\d+) 字符）〕\n/.exec(
-                docs.section,
-            )!;
+            const label = new RegExp(
+                `〔${CONTEXT_DOC_NAME}（已截断：原文 (\\d+) 字符，载入 (\\d+) 字符）〕\\n`,
+            ).exec(docs.section)!;
             const loaded = Number(label[2]);
             expect(Number(label[1])).toBe(text.length);
             expect(loaded).toBeGreaterThan(0);
             expect(loaded).toBeLessThan(text.length);
             expect(text.slice(0, loaded).endsWith("\n")).toBe(true);
             expect(docs.section).toContain(`${label[0]}${text.slice(0, loaded)}`);
-            expect(docs.section).toContain("（未载：预算已用尽）");
             expect(docs.section.endsWith(FOOTER)).toBe(true);
-            expect(renderDocsSection(directory, ["first.md"], 1)).toBeNull();
+            expect(renderDocsSection(directory, 1)).toBeNull();
+        });
+    });
+
+    it("names the file in the omission note when the budget fits it but not the truncation label", () => {
+        withDocs((directory) => {
+            const text = `omission boundary\n${"padding line\n".repeat(40)}`;
+            writeContextDoc(directory, text);
+            const wrapped = (block: string) => `${HEADER}\n${NOTICE}\n\n${block}\n\n${FOOTER}`;
+            const omissionBlock = `〔${CONTEXT_DOC_NAME}（未载：预算已用尽）〕`;
+            const omission = estimateTokens(wrapped(omissionBlock));
+            // The label the renderer would try before falling back, with its
+            // trailing newline and an empty payload, exactly as built in code.
+            const labelBlock = `〔${CONTEXT_DOC_NAME}（已截断：原文 ${text.length} 字符，载入 0 字符）〕\n`;
+            expect(estimateTokens(wrapped(labelBlock))).toBeGreaterThan(omission);
+            const docs = renderDocsSection(directory, omission)!;
+            expect(docs.section).toBe(wrapped(omissionBlock));
+            expect(docs.section).not.toContain(text);
+            expect(docs.files).toEqual([]);
+            expect(docs.truncated).toEqual([]);
         });
     });
 });
 
-describe("project document routing", () => {
+describe("reference-docs budget routing", () => {
     const raw = {
         enabled: true,
         base_url: "http://localhost:9",
@@ -170,37 +309,24 @@ describe("project document routing", () => {
         prefix_path: "/tmp/main.json",
         max_tokens: 2048,
         timeout_ms: 60000,
-        context_docs: ["main-private.md"],
         context_docs_budget_tokens: 1234,
         targets: [
-            {
-                project: "git:other",
-                slot_file: "other.bin",
-                prefix_path: "/tmp/other.json",
-                context_docs: ["other.md"],
-            },
+            { project: "git:other", slot_file: "other.bin", prefix_path: "/tmp/other.json" },
             { project: "git:empty", slot_file: "empty.bin", prefix_path: "/tmp/empty.json" },
         ],
     };
 
-    it("uses a target's own list, not the main project's list", () => {
+    it("shares the docs budget between the main project and a target", () => {
         const config = { memory: { strata_ask: raw } };
-        expect(strataAskConnectionForProject(config, "git:main")?.contextDocs).toEqual([
-            "main-private.md",
-        ]);
-        expect(strataAskConnectionForProject(config, "git:other")?.contextDocs).toEqual([
-            "other.md",
-        ]);
+        expect(strataAskConnectionForProject(config, "git:main")?.contextDocsBudgetTokens).toBe(
+            1234,
+        );
         expect(strataAskConnectionForProject(config, "git:other")?.contextDocsBudgetTokens).toBe(
             1234,
         );
     });
 
-    it("defaults an unspecified target list to empty and validates the budget fallback", () => {
-        expect(
-            strataAskConnectionForProject({ memory: { strata_ask: raw } }, "git:empty")
-                ?.contextDocs,
-        ).toEqual([]);
+    it("validates the budget fallback", () => {
         for (const budget of [undefined, 0, 32769, 1.5, Infinity]) {
             const connection = strataAskConnectionFromConfig({
                 memory: { strata_ask: { ...raw, context_docs_budget_tokens: budget } },
@@ -261,13 +387,14 @@ function lockCandidates(directory: string): string[] {
 
 /**
  * A second slot in the same prefix directory, so isolation is observable.
- * `docs` also decides maintenance's below-threshold gate: an empty list lets a
- * small memory-only project skip cache creation entirely, so a test that expects
- * `maintainCache` to create must keep the default non-empty list.
+ * `withContextDoc` also decides maintenance's below-threshold gate: without
+ * the fixed `.cortexkit/context.md` doc a small memory-only project skips
+ * cache creation entirely, so a test that expects `maintainCache` to create
+ * must keep the default present-doc fixture.
  */
 async function withCacheFixture(
     run: (fixture: CacheFixture) => Promise<void>,
-    docs = ["guide.md"],
+    withContextDoc = true,
 ): Promise<void> {
     const root = createTestTempDirFromPath(join(tmpdir(), "mc-strata-cache-"));
     const directory = join(root, "project");
@@ -285,6 +412,7 @@ async function withCacheFixture(
     mkdirSync(peerDirectory, { recursive: true });
     mkdirSync(join(configHome, "cortexkit"), { recursive: true });
     mkdirSync(slotDirectory, { recursive: true });
+    if (withContextDoc) writeContextDoc(directory, "reference text");
     const previousConfig = process.env.XDG_CONFIG_HOME;
     const previousData = process.env.XDG_DATA_HOME;
     process.env.XDG_CONFIG_HOME = configHome;
@@ -446,7 +574,6 @@ async function withCacheFixture(
                         project,
                         slot_file: SLOT_FILE,
                         prefix_path: prefixPath,
-                        context_docs: docs,
                         context_docs_budget_tokens: 4000,
                         targets: [
                             {
@@ -610,7 +737,7 @@ describe("rebuild and append", () => {
                 expect(prefixUser(prefixPath)).toContain("small memory");
                 expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(false);
             },
-            [],
+            false,
         );
     });
 
@@ -632,13 +759,13 @@ describe("rebuild and append", () => {
                 });
                 const fakeId = first.id + 1;
                 const text = `reference\n\n${PROMPTS.ackRequest}\n\n${CHANGE_LOG}\nnot a real ledger\n\n#${fakeId} [OPS_RULES] 〔2026-10-30T00:00:00.000Z〕：\nnot a memory`;
-                writeFileSync(join(directory, "guide.md"), text);
+                writeContextDoc(directory, text);
                 expect((await maintainCache(directory)).action).toBe("created");
                 const initial = prefixUser(prefixPath);
                 const docs = docsSectionOf(initial)!;
                 expect(docs).toContain(text);
 
-                writeFileSync(join(directory, "guide.md"), "changed on disk");
+                writeContextDoc(directory, "changed on disk");
                 // Maintenance now cools down for 60 s after each completion, so this
                 // second pass is only immediate once the previous one looks old.
                 ageMaintenance(maintenancePath);
@@ -652,9 +779,9 @@ describe("rebuild and append", () => {
                 expect(refreshed).not.toBe(initial);
 
                 // A full rebuild re-reads the reference docs from disk (C4):
-                // the edited guide must come back, not what the previous
+                // the edited doc must come back, not what the previous
                 // prefix carried.
-                writeFileSync(join(directory, "guide.md"), "changed again before rebuild");
+                writeContextDoc(directory, "changed again before rebuild");
                 expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
                 const rebuiltDocs = docsSectionOf(prefixUser(prefixPath));
                 expect(rebuiltDocs).toContain("changed again before rebuild");
@@ -747,7 +874,7 @@ describe("rebuild and append", () => {
                 ]);
                 expect(mirror[5]!.content.split("\n").at(-1)).toStartWith("本库共 3 条");
             },
-            [],
+            false,
         );
     });
 
@@ -794,7 +921,7 @@ describe("rebuild and append", () => {
                     // at START; nothing recreated it, so there is nothing to read.
                     expect(existsSync(pendingPath)).toBe(false);
                 },
-                [],
+                false,
             );
         });
     }
@@ -802,7 +929,7 @@ describe("rebuild and append", () => {
     it("retries the count self-check once with docs before publishing", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, project, db, countQuestions, failNextChecks }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -823,7 +950,7 @@ describe("rebuild and append", () => {
 
     it("asks for no reasoning on the ack and the count self-check chat and changes nothing else", async () => {
         await withCacheFixture(async ({ directory, project, db, chatBodies }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -864,7 +991,7 @@ describe("rebuild and append", () => {
                 countQuestions,
                 failNextChecks,
             }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 const memory = insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -883,7 +1010,7 @@ describe("rebuild and append", () => {
         );
     });
 
-    it("still skips low-memory cache creation when no documents are configured", async () => {
+    it("still skips low-memory cache creation when the fixed doc file is absent", async () => {
         await withCacheFixture(async ({ directory, prefixPath, project, db, countQuestions }) => {
             insertMemory(db, {
                 projectPath: project,
@@ -895,7 +1022,44 @@ describe("rebuild and append", () => {
             expect(result.detail).toBe("below-threshold");
             expect(existsSync(prefixPath)).toBe(false);
             expect(countQuestions).toHaveLength(0);
-        }, []);
+        }, false);
+    });
+
+    it("bypasses the small-memory creation threshold when the fixed doc file is present", async () => {
+        await withCacheFixture(async ({ directory, prefixPath, project, db }) => {
+            insertMemory(db, {
+                projectPath: project,
+                category: "OPS_RULES",
+                content: "one memory",
+            });
+            expect((await maintainCache(directory)).action).toBe("created");
+            expect(existsSync(prefixPath)).toBe(true);
+        });
+    });
+
+    it("does not bypass the creation threshold through a symlinked .cortexkit directory", async () => {
+        await withCacheFixture(
+            async ({ directory, prefixPath, project, db, countQuestions }) => {
+                insertMemory(db, {
+                    projectPath: project,
+                    category: "OPS_RULES",
+                    content: "one memory",
+                });
+                // A symlinked .cortexkit must not count as a present reference
+                // doc: the low-memory project stays below the creation
+                // threshold instead of being lifted by external content.
+                const outside = join(dirname(directory), "outside-doc");
+                mkdirSync(outside, { recursive: true });
+                writeFileSync(join(outside, CONTEXT_DOC_NAME), "external doc text");
+                symlinkSync(outside, join(directory, CONTEXT_DOC_DIR), "dir");
+                const result = await maintainCache(directory);
+                expect(result.action).toBe("skipped");
+                expect(result.detail).toBe("below-threshold");
+                expect(existsSync(prefixPath)).toBe(false);
+                expect(countQuestions).toHaveLength(0);
+            },
+            false,
+        );
     });
 
     it("does not retry the self-check without a docs section", async () => {
@@ -911,14 +1075,14 @@ describe("rebuild and append", () => {
                 expect(countQuestions).toHaveLength(1);
                 expect(existsSync(prefixPath)).toBe(false);
             },
-            [],
+            false,
         );
     });
 
     it("rebuilds at maintenance when an unrecorded addition left the count short", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, maintenancePath, project, db }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 const first = insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -963,7 +1127,7 @@ describe("rebuild and append", () => {
     it("rebuilds at maintenance even when count and every max id match a divergent slot", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, maintenancePath, project, db }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 const first = insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -1017,7 +1181,7 @@ describe("rebuild and append", () => {
 
     it("rebuilds a dead ledger even when divergent slot watermarks match", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const first = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1065,7 +1229,7 @@ describe("rebuild and append", () => {
 
     it("includes a permanent memory in the consolidation measure and the splice", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1106,7 +1270,7 @@ describe("rebuild and append", () => {
             const user = prefixUser(prefixPath);
             expect(user).toContain("permanent memory");
             expect(user.split("\n").at(-1)).toStartWith("本库共 1 条");
-        }, []);
+        }, false);
     });
 });
 
@@ -1181,7 +1345,7 @@ describe("status ledger reduction", () => {
             expect(parseChanges(raw).changes).toHaveLength(2);
             expect((await consolidateCache(directory)).detail).toBe("below-threshold");
             expect(readFileSync(pendingPath, "utf8")).toBe(raw);
-        }, []);
+        }, false);
     });
 });
 
@@ -1222,14 +1386,14 @@ describe("status ledger consolidation", () => {
                 expect((await consolidateCache(directory)).detail).toBe("pending-write");
                 expect(remoteSidecar()).toEqual(remoteSlot());
             },
-            [],
+            false,
         );
     });
 
     it("keeps a concurrent rebuild's leftover add followed by an archive, then rebuilds at the threshold", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, project, db, onNextSave }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
                 const memory = insertMemory(db, {
                     projectPath: project,
@@ -1275,7 +1439,7 @@ describe("status ledger consolidation", () => {
 
     it("keeps an update after a leftover add and rebuilds the old slot text at the threshold", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const memory = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1309,7 +1473,7 @@ describe("status ledger consolidation", () => {
 
     it("rebuilds rather than splicing when adds are recorded after their update and removal", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const updated = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1357,7 +1521,7 @@ describe("status ledger consolidation", () => {
     it("keeps a small ledger queued and leaves the published slot byte-identical", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, project, db, chatBodies }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 const memory = insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -1382,7 +1546,7 @@ describe("status ledger consolidation", () => {
 
     it("rebuilds instead of splicing when a large batch carries a removal", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const first = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1422,7 +1586,7 @@ describe("status ledger consolidation", () => {
 
     it("never splices a ledger carrying a torn or corrupt line, rebuilding instead", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const first = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1474,7 +1638,7 @@ describe("status ledger consolidation", () => {
                 countQuestions,
                 failNextChecks,
             }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -1505,7 +1669,7 @@ describe("status ledger consolidation", () => {
 
     it("rebuilds instead of consuming a dead ledger when the slot lags the database", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const first = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1532,7 +1696,7 @@ describe("status ledger consolidation", () => {
 
     it("rebuilds an add-then-remove restored and edited without a new ledger row", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
             const memory = insertMemory(db, {
                 projectPath: project,
@@ -1561,7 +1725,7 @@ describe("status ledger consolidation", () => {
 
     it("does not splice a large addition batch containing a restored add-then-remove", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
             const memory = insertMemory(db, {
                 projectPath: project,
@@ -1604,7 +1768,7 @@ describe("status ledger consolidation", () => {
                 chatBodies,
                 remoteSlot,
             }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 expect((await rebuildCache(directory, "initial")).action).toBe("rebuilt");
                 const originalPrefix = readFileSync(prefixPath, "utf8");
                 const memory = insertMemory(db, {
@@ -1660,7 +1824,7 @@ describe("status ledger consolidation", () => {
     it("rebuilds when a removal's memory is active again", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, project, db, countQuestions }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 const first = insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -1692,7 +1856,7 @@ describe("status ledger consolidation", () => {
 
     it("measures a boundary batch of archived adds identically to the query side", async () => {
         await withCacheFixture(async ({ directory, prefixPath, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const first = insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -1745,7 +1909,7 @@ describe("status ledger consolidation", () => {
 
     it("prices a vanished update as an obituary during consolidation", async () => {
         await withCacheFixture(async ({ directory, pendingPath, project, db }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             const ts = "2026-10-30T00:00:00.000Z";
             const ids: number[] = [];
             const rows: string[] = [];
@@ -1775,7 +1939,7 @@ describe("status ledger consolidation", () => {
     it("lets a stale sidecar outrank a below-threshold ledger", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, pendingPath, project, db, chatBodies }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 const memory = insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -1829,7 +1993,7 @@ describe("status ledger consolidation", () => {
                     ).toBeUndefined();
                     expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(false);
                 },
-                [],
+                false,
             );
         });
     }
@@ -1882,7 +2046,7 @@ describe("status ledger consolidation", () => {
                 expect(existsSync(pendingPath)).toBe(false);
                 expect(existsSync(marker)).toBe(false);
             },
-            [],
+            false,
         );
     });
 
@@ -1912,7 +2076,7 @@ describe("status ledger consolidation", () => {
                 // DB render and does not survive it.
                 expect(existsSync(pendingPath)).toBe(false);
             },
-            [],
+            false,
         );
     });
 
@@ -1928,7 +2092,7 @@ describe("status ledger consolidation", () => {
                 remoteSlot,
                 chatBodies,
             }) => {
-                writeFileSync(join(directory, "guide.md"), "reference text");
+                writeContextDoc(directory, "reference text");
                 insertMemory(db, {
                     projectPath: project,
                     category: "OPS_RULES",
@@ -1976,7 +2140,7 @@ describe("status ledger consolidation", () => {
             const lines = readFileSync(pendingPath, "utf8").split("\n");
             expect(lines[0]).toBe(`{"op":"add","id":`);
             expect(JSON.parse(lines[1]!)).toMatchObject({ op: "add", id: memory.id });
-        }, []);
+        }, false);
     });
 });
 
@@ -2032,7 +2196,7 @@ describe("cache state paths", () => {
                 expect(readFileSync(peerPendingPath, "utf8")).toContain(`"id":${memory.id}`);
                 expect(prefixUser(prefixPath)).toBe(published);
             },
-            [],
+            false,
         );
     });
 });
@@ -2066,7 +2230,7 @@ describe("remote slot lifecycle", () => {
                 ]);
                 expect(lockSeenDuringCalls.every(Boolean)).toBe(true);
             },
-            [],
+            false,
         );
     });
 
@@ -2092,7 +2256,7 @@ describe("remote slot lifecycle", () => {
                 { save: SLOT_FILE },
                 { restore: SLOT_FILE, splice: true },
             ]);
-        }, []);
+        }, false);
     });
 
     it("ignores a missing slot on restore but aborts a rebuild on any other restore failure", async () => {
@@ -2117,7 +2281,7 @@ describe("remote slot lifecycle", () => {
             expect((await rebuildCache(directory, "test")).action).toBe("error");
             failRestore(null);
             expect((await rebuildCache(directory, "test")).action).toBe("rebuilt");
-        }, []);
+        }, false);
     });
 
     it("fails the write when the server reports save_error; the event renders from the DB next time", async () => {
@@ -2135,7 +2299,7 @@ describe("remote slot lifecycle", () => {
                 // Approved order: the ledger was deleted at rebuild START.
                 expect(existsSync(pendingPath)).toBe(false);
             },
-            [],
+            false,
         );
     });
 
@@ -2169,7 +2333,7 @@ describe("remote slot lifecycle", () => {
                 expect(remoteSidecar()).toEqual(remoteSlot());
                 expect(prefixUser(prefixPath)).toContain("one memory");
             },
-            [],
+            false,
         );
     });
 
@@ -2217,7 +2381,7 @@ describe("remote slot lifecycle", () => {
                 expect(remoteSidecar()).toEqual(remoteSlot());
                 expect(prefixUser(prefixPath)).toContain("new memory");
             },
-            [],
+            false,
         );
     });
 
@@ -2235,7 +2399,7 @@ describe("remote slot lifecycle", () => {
             );
             expect(saves).toHaveLength(2);
             expect(saves[0]?.strata_session).toEqual(saves[1]?.strata_session);
-        }, []);
+        }, false);
     });
 
     it("retries the composite save once on a 409 model_busy", async () => {
@@ -2252,7 +2416,7 @@ describe("remote slot lifecycle", () => {
             );
             expect(saves).toHaveLength(2);
             expect(saves[0]?.strata_session).toEqual(saves[1]?.strata_session);
-        }, []);
+        }, false);
     });
 
     it("fails the write on a persistent conflict and publishes nothing", async () => {
@@ -2265,7 +2429,7 @@ describe("remote slot lifecycle", () => {
             failSaves("splice_stale", 2);
             expect((await rebuildCache(directory, "test")).action).toBe("error");
             expect(existsSync(prefixPath)).toBe(false);
-        }, []);
+        }, false);
     });
 
     it("forces a rebuild when the sidecar marker is present and clears it after the save", async () => {
@@ -2410,7 +2574,7 @@ describe("cross-process cache lock", () => {
             } finally {
                 jest.useRealTimers();
             }
-        }, []);
+        }, false);
     });
 
     it("reclaims a candidate whose owner is gone and always releases its own", async () => {
@@ -2432,7 +2596,7 @@ describe("cross-process cache lock", () => {
                 expect(lockSeenDuringCalls.every(Boolean)).toBe(true);
                 expect(lockCandidates(lockDirectory)).toEqual([]);
             },
-            [],
+            false,
         );
     });
 
@@ -2447,7 +2611,7 @@ describe("cross-process cache lock", () => {
             failRestore(500);
             expect((await rebuildCache(directory, "test")).action).toBe("error");
             expect(lockCandidates(lockDirectory)).toEqual([]);
-        }, []);
+        }, false);
     });
 });
 
@@ -2584,7 +2748,7 @@ describe("maintenance cooldown", () => {
 
     it("waits a full 60 s from the previous completion before starting again", async () => {
         await withCacheFixture(async ({ directory, maintenancePath, project, db }) => {
-            const guide = join(directory, "guide.md");
+            const guide = contextDocPath(directory);
             writeFileSync(guide, "reference text");
             insertMemory(db, {
                 projectPath: project,
@@ -2627,7 +2791,7 @@ describe("maintenance cooldown", () => {
     it("delays slot B for 60 s after slot A completes in the same lock directory", async () => {
         await withCacheFixture(
             async ({ directory, prefixPath, maintenancePath, project, db, calls }) => {
-                const guide = join(directory, "guide.md");
+                const guide = contextDocPath(directory);
                 writeFileSync(guide, "reference text");
                 insertMemory(db, {
                     projectPath: project,
@@ -2684,6 +2848,9 @@ describe("maintenance cooldown", () => {
     it("holds neither the cache lock nor the process queue during the cooldown sleep", async () => {
         await withCacheFixture(
             async ({ directory, maintenancePath, lockDirectory, project, db }) => {
+                // Plain reference file, NOT the fixed `.cortexkit/context.md` doc:
+                // this fixture runs with no context doc so the small-memory
+                // project stays below the creation threshold.
                 const guide = join(directory, "guide.md");
                 writeFileSync(guide, "reference text");
                 insertMemory(db, {
@@ -2728,13 +2895,13 @@ describe("maintenance cooldown", () => {
                     jest.useRealTimers();
                 }
             },
-            [],
+            false,
         );
     });
 
     it("records completion after a failed attempt so it cannot be hammered", async () => {
         await withCacheFixture(async ({ directory, maintenancePath, project, db, failRestore }) => {
-            writeFileSync(join(directory, "guide.md"), "reference text");
+            writeContextDoc(directory, "reference text");
             insertMemory(db, {
                 projectPath: project,
                 category: "OPS_RULES",
@@ -2776,7 +2943,7 @@ describe("maintenance cooldown", () => {
             } finally {
                 jest.useRealTimers();
             }
-        }, []);
+        }, false);
     });
 });
 
@@ -2808,7 +2975,7 @@ describe("successful rebuild record", () => {
             failSaves("save_error");
             expect((await rebuildCache(directory, "test")).action).toBe("error");
             expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBe(first);
-        }, []);
+        }, false);
     }, 20_000);
 
     it("keeps the pending-write marker when the completion record cannot be written", async () => {
@@ -2828,7 +2995,7 @@ describe("successful rebuild record", () => {
             // pass re-renders and re-records instead of presenting the mirror
             // as ready with no completion time.
             expect(existsSync(`${prefixPath}.pending-write.json`)).toBe(true);
-        }, []);
+        }, false);
     }, 20_000);
 
     it("keeps the previous completion record when the re-record fails", async () => {
@@ -2860,7 +3027,7 @@ describe("successful rebuild record", () => {
                 __setLastRebuildRecordHookForTests(undefined);
                 chmodSync(slotDir, 0o700);
             }
-        }, []);
+        }, false);
     }, 20_000);
 });
 
@@ -2889,7 +3056,7 @@ describe("rebuild ledger order (user-approved: delete at rebuild start)", () => 
                 // Nothing recreated the ledger: no consumption at completion.
                 expect(existsSync(pendingPath)).toBe(false);
             },
-            [],
+            false,
         );
     });
 
@@ -2921,7 +3088,7 @@ describe("rebuild ledger order (user-approved: delete at rebuild start)", () => 
                 const parsed = parseChanges(readFileSync(pendingPath, "utf8"));
                 expect(parsed.changes.map((row) => row.id)).toEqual([lateId]);
             },
-            [],
+            false,
         );
     });
 
@@ -2957,7 +3124,7 @@ describe("rebuild ledger order (user-approved: delete at rebuild start)", () => 
                 // The completion record still describes the last SUCCESS.
                 expect(readSuccessfulRebuildAt(prefixPath, SLOT_FILE)).toBe(stamped);
             },
-            [],
+            false,
         );
     });
 });
