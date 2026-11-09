@@ -15,6 +15,7 @@ import {
     parseIdShapedQuery,
     resolveMemoriesByIdsForSearch,
     unifiedSearch,
+    type ReservedSearchCandidates,
 } from "../../features/magic-context/search";
 import { searchMessageHistoryOffThread } from "../../hooks/magic-context/auto-search-worker-client";
 import { getVisibleMemoryIds } from "../../hooks/magic-context/inject-compartments";
@@ -36,7 +37,12 @@ import {
     tryStrataAskDetailed,
     VALID_SOURCES,
 } from "./strata-ask";
-import { buildTransientMaterial } from "./transient-material";
+import {
+    buildReservedHits,
+    buildTransientMaterial,
+    withReservedAppendix,
+    type TransientMaterial,
+} from "./transient-material";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
 export { CTX_SEARCH_LIGHT_DESCRIPTION } from "../light-descriptions";
@@ -133,7 +139,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 return resolvedProjectPath;
             };
 
-            const runClassic = async (overrides?: { sources?: CtxSearchSource[] }) => {
+            const runClassic = async (
+                overrides?: { sources?: CtxSearchSource[] },
+                collectReserved?: (candidates: ReservedSearchCandidates) => void,
+            ) => {
                 // Only search message history up to the last compartment boundary —
                 // anything after that (the live tail, including the current turn) is
                 // still in context and already visible to the agent. When NO compartment
@@ -235,6 +244,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                                 : undefined,
                         // Explicit agent search enables literal-probe multi-query recall.
                         explicitSearch: true,
+                        // Reserved candidates feed the deterministic post-model
+                        // appendix on the fusion route only; plain classic calls
+                        // (and auto-search) never collect them.
+                        ...(collectReserved ? { collectReservedCandidates: collectReserved } : {}),
                         rerankConnectionFile: deps.rerankConnectionFile,
                         rerankConfig: deps.rerankConfig,
                         onRerankSkipped: (line) => {
@@ -309,21 +322,28 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         // ledger's changes it is not authoritative — the query
                         // falls back to the FULL classic search, memories
                         // included.
-                        const classic = await runClassic({
-                            sources: args.sources?.filter((source) => source !== "memory") ?? [
-                                "git_commit", "primer", "note", "message",
-                            ],
-                        });
+                        let reservedCandidates: ReservedSearchCandidates | undefined;
+                        const classic = await runClassic(
+                            {
+                                sources: args.sources?.filter((source) => source !== "memory") ?? [
+                                    "git_commit", "primer", "note", "message",
+                                ],
+                            },
+                            (candidates) => {
+                                reservedCandidates = candidates;
+                            },
+                        );
                         if (!classic.ok) return classic.text;
-                        let transient: string | undefined;
+                        let material: TransientMaterial | null = null;
                         try {
-                            transient = buildTransientMaterial({
+                            material = buildTransientMaterial({
                                 db: deps.db,
                                 sessionId: toolContext.sessionID,
                                 query,
                                 results: classic.results,
                                 budgetTokens: activeConnection.transientBudgetTokens,
-                            })?.text;
+                                reservedCandidates,
+                            });
                         } catch (error) {
                             const reason = (
                                 error instanceof Error ? error.message : String(error)
@@ -337,6 +357,13 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             }
                             return classic.text;
                         }
+                        const transient = material?.text;
+                        // The appendix rides even a null material: reserved hits
+                        // survive truncation, so the pre-run may have candidates
+                        // while its final result list is empty.
+                        const reserved = material
+                            ? material.reserved
+                            : buildReservedHits(deps.db, query, reservedCandidates);
                         const answer = await tryStrataAskDetailed({
                             query,
                             config: activeConnection,
@@ -347,13 +374,19 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             statusDocument: readStatus,
                         });
                         if (answer.status === "answered") {
-                            return args.sources ? mixedSourcesAnswer(answer.text) : answer.text;
+                            const base = args.sources
+                                ? mixedSourcesAnswer(answer.text)
+                                : answer.text;
+                            return withReservedAppendix(base, reserved, query);
                         }
                         if (
                             answer.status === "failed" &&
                             ["status_unavailable", "http_409", "http_400"].includes(answer.reason)
                         ) {
                             return (await runClassic()).text;
+                        }
+                        if (answer.status === "miss") {
+                            return withReservedAppendix(classic.text, reserved, query);
                         }
                         return classic.text;
                     }

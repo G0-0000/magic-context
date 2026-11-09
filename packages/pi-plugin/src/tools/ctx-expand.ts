@@ -31,11 +31,20 @@ import {
 } from "@magic-context/core/tools/ctx-expand/constants";
 import { resolveCtxExpandMode } from "@magic-context/core/tools/ctx-expand/mode";
 import {
+	checkCrossSessionExpandOwnership,
+	checkCrossSessionRangeAttribution,
+} from "@magic-context/core/tools/ctx-expand/project-ownership";
+import {
 	renderItemByTag,
 	renderMessageByOrdinal,
 	renderVerboseRange,
 } from "@magic-context/core/tools/ctx-expand/render";
-import { renderSearchArchive } from "@magic-context/core/tools/ctx-expand/search-archive";
+import {
+	crossSessionEmptyArchiveMessage,
+	relabelCrossSessionArchive,
+	renderSearchArchive,
+	renderSearchArchiveOffThread,
+} from "@magic-context/core/tools/ctx-expand/search-archive";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 import {
@@ -78,6 +87,12 @@ const ParamsSchema = Type.Object(
 					"Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
 			}),
 		),
+		sessionId: Type.Optional(
+			Type.String({
+				description:
+					"Full sessionId of another session in this project to expand (from a cross-session ctx_search hit). Only message=<ordinal> or start/end work with it, and the reply is indexed text from the search archive only.",
+			}),
+		),
 	},
 	{ additionalProperties: true },
 );
@@ -96,9 +111,87 @@ function err(text: string) {
 	};
 }
 
+/**
+ * Cross-session expand: read the target session's search archive (indexed
+ * text only) after the ownership gate proves the target belongs to the
+ * caller's project. Tags are session-local and verbose needs per-part raw
+ * previews the archive does not hold, so both are refused here — including
+ * message mode with verbose:true. A session that changed project keeps its
+ * old-project rows indexed under the same session id; the range attribution
+ * check refuses rows indexed before the move. Mirrors the OpenCode tool's
+ * cross-session branch.
+ */
+async function executeCrossSessionExpand(
+	deps: CtxExpandToolDeps,
+	cwd: string,
+	targetSessionId: string,
+	params: CtxExpandParams,
+) {
+	const mode = resolveCtxExpandMode(params, "positive");
+	if (mode.kind === "error") return err(mode.message);
+	if (mode.kind === "tag") {
+		return err(
+			"Error: tag lookup is session-local — tags and their attachments are not archived — so ctx_expand cannot expand a tag of another session. Use message=<ordinal> or start=<ordinal>, end=<ordinal> against that session instead.",
+		);
+	}
+	if (
+		(mode.kind === "range" && mode.verbose) ||
+		(mode.kind === "message" && params.verbose === true)
+	) {
+		return err(
+			"Error: verbose ranges are not available for cross-session expand (the search archive holds indexed text, not per-part previews). Use start/end without verbose, or message=<ordinal>.",
+		);
+	}
+	if (!deps.resolveProjectIdentity) {
+		return err(
+			"Error: cross-session expand is unavailable in this host: no project-identity resolver is wired for ctx_expand. No content was returned.",
+		);
+	}
+	const ownership = checkCrossSessionExpandOwnership(
+		deps.db,
+		(directory) => deps.resolveProjectIdentity?.({ cwd: directory }),
+		cwd,
+		targetSessionId,
+	);
+	if (!ownership.ok) return err(ownership.error);
+	const start = mode.kind === "message" ? mode.message : mode.start;
+	const end = mode.kind === "message" ? mode.message : mode.end;
+	if (ownership.notBeforeMs !== undefined) {
+		// The target changed project at some point; rows indexed before the move
+		// belong to its previous project and must not leak into this one. The
+		// gate refuses up front, so the off-thread archive read below is never
+		// asked to serve a gated range.
+		const attribution = checkCrossSessionRangeAttribution(
+			deps.db,
+			targetSessionId,
+			start,
+			end,
+			ownership.notBeforeMs,
+		);
+		if (attribution.kind === "refuse") return err(attribution.error);
+	}
+	const archived = await renderSearchArchiveOffThread(
+		deps.db,
+		targetSessionId,
+		start,
+		end,
+		CTX_EXPAND_TOKEN_BUDGET,
+		true,
+	);
+	if (!archived.text) return ok(crossSessionEmptyArchiveMessage(targetSessionId, start, end));
+	return ok(relabelCrossSessionArchive(archived.text, targetSessionId, archived.truncated));
+}
+
 export interface CtxExpandToolDeps {
 	db: ContextDatabase;
 	expandTools?: Record<string, string | false>;
+	/**
+	 * Resolve the calling session's project identity from its cwd. Required for
+	 * cross-session expand: the ownership gate compares this identity against
+	 * the target session's session_projects mapping, and without the resolver
+	 * cross-session calls are refused.
+	 */
+	resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
 }
 
 export function createCtxExpandTool(
@@ -121,10 +214,21 @@ export function createCtxExpandTool(
 				end: "number",
 				verbose: "boolean",
 				message: "number",
+				sessionId: "string",
 			});
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (!sessionId) {
 				return err("Error: no active Pi session.");
+			}
+
+			// Cross-session expands read the target's search archive only. Branch
+			// before the raw-provider registration, the Pi branch alignment, and
+			// the current-session compartment cutoff below: none of that applies
+			// to another session.
+			const requestedSessionId =
+				typeof params.sessionId === "string" ? params.sessionId.trim() : "";
+			if (requestedSessionId.length > 0 && requestedSessionId !== sessionId) {
+				return executeCrossSessionExpand(deps, ctx.cwd, requestedSessionId, params);
 			}
 
 			// All raw reads go through the shared provider-aware helpers, so

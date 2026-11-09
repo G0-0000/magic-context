@@ -73,7 +73,9 @@ export function searchResultKey(hit: UnifiedSearchResult): string {
         case "primer":
             return `primer:${hit.primerId}`;
         case "message":
-            return `message:${hit.messageId}`;
+            // Message ids are unique only within a session — key by the full
+            // sessionId+messageId identity so two sessions' hits never fuse.
+            return `message:${hit.sessionId}:${hit.messageId}`;
         case "compartment":
             return `compartment:${hit.compartmentId}`;
         case "git_commit":
@@ -94,6 +96,9 @@ export function fuseSearchLanes(lanes: SearchLanes): UnifiedSearchResult[] {
                 name === "message_fts" && original.source === "message"
                     ? (compartments.find(
                           (chunk) =>
+                              // Ordinal ranges are per-session: a message may
+                              // only vote for a compartment of its OWN session.
+                              chunk.sessionId === original.sessionId &&
                               original.messageOrdinal >= chunk.startOrdinal &&
                               original.messageOrdinal <= chunk.endOrdinal,
                       ) ?? original)
@@ -499,12 +504,15 @@ export function candidateTexts(
                 break;
             }
             case "message": {
-                // The ordinal map avoids scanning the FTS table's unindexed identity columns.
+                // Read the hit's OWN session, never the caller's: the ordinal
+                // map avoids scanning the FTS table's unindexed identity columns.
+                const hitSessionId = hit.sessionId;
                 const mapped = db
                     .prepare(`SELECT f.content FROM message_fts_rowid_map m
-                    JOIN message_history_fts f ON f.rowid=m.fts_rowid
+                    JOIN message_history_fts f
+                      ON f.rowid=m.fts_rowid AND f.session_id=m.session_id
                     WHERE m.session_id=? AND m.message_ordinal=? AND f.message_id=?`)
-                    .get(sessionId, hit.messageOrdinal, hit.messageId) as
+                    .get(hitSessionId, hit.messageOrdinal, hit.messageId) as
                     | { content: string }
                     | undefined;
                 const row =
@@ -513,10 +521,10 @@ export function candidateTexts(
                         .prepare(
                             "SELECT content FROM message_history_fts WHERE session_id=? AND message_id=? ORDER BY CAST(message_ordinal AS INTEGER) LIMIT 1",
                         )
-                        .get(sessionId, hit.messageId) as { content: string });
+                        .get(hitSessionId, hit.messageId) as { content: string });
                 body = row.content;
                 title = `${hit.role}: ${body.split("\n")[0]}`;
-                location = `message ${hit.messageId} ${sessionId} @${hit.messageOrdinal}`;
+                location = `message ${hit.messageId} ${hitSessionId} @${hit.messageOrdinal}`;
                 break;
             }
             case "compartment": {

@@ -10,14 +10,22 @@ import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 import { getSqliteDatabasePath } from "../../shared/sqlite";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
-import { resolveCtxExpandMode } from "./mode";
+import { type CtxExpandMode, resolveCtxExpandMode } from "./mode";
+import {
+    checkCrossSessionExpandOwnership,
+    checkCrossSessionRangeAttribution,
+} from "./project-ownership";
 import {
     type RecoveryAttachments,
     renderItemByTag,
     renderMessageByOrdinal,
     renderVerboseRangeForTool,
 } from "./render";
-import { renderSearchArchiveOffThread } from "./search-archive";
+import {
+    crossSessionEmptyArchiveMessage,
+    relabelCrossSessionArchive,
+    renderSearchArchiveOffThread,
+} from "./search-archive";
 import type { CtxExpandArgs } from "./types";
 import { readV2ArchiveOffThread } from "./v2-archive-reader";
 
@@ -36,6 +44,14 @@ export interface CtxExpandToolDeps {
      * item. Tag lookup is refused in Rust mode for that reason.
      */
     transformMode?: "ts" | "rust";
+    /**
+     * Resolves the calling session's project identity from its working
+     * directory (git:<root sha> / dir:<md5>). Required for cross-session
+     * expand: the ownership gate compares this identity against the target
+     * session's session_projects mapping, and without the resolver
+     * cross-session calls are refused.
+     */
+    resolveProjectPath?: (directory: string) => string | undefined;
 }
 
 /** Reply for `ctx_expand(tag=N)` when the tag numbers belong to the Rust module. */
@@ -71,6 +87,12 @@ const ctxExpandArgsShape = {
         .describe(
             "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
         ),
+    sessionId: tool.schema
+        .string()
+        .optional()
+        .describe(
+            "Full sessionId of another session in this project to expand (from a cross-session ctx_search hit). Only message=<ordinal> or start/end work with it, and the reply is indexed text from the search archive only.",
+        ),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
@@ -89,9 +111,28 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 end: "number",
                 verbose: "boolean",
                 message: "number",
+                sessionId: "string",
             });
             const sessionId = toolContext.sessionID;
+            const requestedSessionId =
+                typeof args.sessionId === "string" ? args.sessionId.trim() : "";
+            const crossSessionTarget =
+                requestedSessionId.length > 0 && requestedSessionId !== sessionId
+                    ? requestedSessionId
+                    : undefined;
             const mode = resolveCtxExpandMode(args, "positive");
+            // Cross-session expands read the target's search archive only:
+            // no ordinal warmup, no raw provider, no compartment cutoff, and
+            // no Pi/V2 alignment against the current session.
+            if (crossSessionTarget) {
+                return executeCrossSessionExpand(
+                    deps,
+                    toolContext.directory,
+                    crossSessionTarget,
+                    mode,
+                    args.verbose === true,
+                );
+            }
             // Refuse before touching history: no host read can make a module-numbered
             // tag resolvable, so warming ordinals for it would only delay the refusal.
             if (mode.kind === "tag" && deps.transformMode === "rust") {
@@ -110,7 +151,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                         throw new Error(
                             "Search archive worker unavailable: private archive has no off-thread source",
                         );
-                    const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                    const { text } = await readV2ArchiveOffThread(path, source.path, sessionId, {
                         kind: "tag",
                         tag: mode.tag,
                     });
@@ -132,7 +173,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                         throw new Error(
                             "Search archive worker unavailable: private archive has no off-thread source",
                         );
-                    const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                    const { text } = await readV2ArchiveOffThread(path, source.path, sessionId, {
                         kind: "message",
                         message: mode.message,
                         tokenBudget: CTX_EXPAND_TOKEN_BUDGET,
@@ -144,13 +185,15 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                     return text;
                 }
                 return (
-                    (await renderSearchArchiveOffThread(
-                        deps.db,
-                        sessionId,
-                        mode.message,
-                        mode.message,
-                        CTX_EXPAND_TOKEN_BUDGET,
-                    )) ?? renderMessageByOrdinal(sessionId, mode.message, deps.recoveryAttachments)
+                    (
+                        await renderSearchArchiveOffThread(
+                            deps.db,
+                            sessionId,
+                            mode.message,
+                            mode.message,
+                            CTX_EXPAND_TOKEN_BUDGET,
+                        )
+                    ).text ?? renderMessageByOrdinal(sessionId, mode.message, deps.recoveryAttachments)
                 );
             }
             const { start, end, verbose } = mode;
@@ -170,7 +213,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                     throw new Error(
                         "Search archive worker unavailable: private archive has no off-thread source",
                     );
-                const text = await readV2ArchiveOffThread(path, source.path, sessionId, {
+                const { text } = await readV2ArchiveOffThread(path, source.path, sessionId, {
                     kind: "verbose",
                     start,
                     end: effectiveEnd,
@@ -188,7 +231,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 effectiveEnd,
                 CTX_EXPAND_TOKEN_BUDGET,
             );
-            if (archived) return archived;
+            if (archived.text) return archived.text;
 
             // Verbose mode: each message separate, with ids + per-part previews.
             if (verbose) {
@@ -231,6 +274,68 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             return lines.join("\n");
         },
     });
+}
+
+/**
+ * Cross-session expand: read the target session's search archive (indexed
+ * text only) after the ownership gate proves the target belongs to the
+ * caller's project. Tags are session-local and verbose needs per-part raw
+ * previews the archive does not hold, so both are refused here — including
+ * message mode with verbose:true, which would silently degrade to the
+ * non-verbose text without saying so. A session that changed project keeps
+ * its old-project rows indexed under the same session id; the range
+ * attribution check refuses rows indexed before the move.
+ */
+async function executeCrossSessionExpand(
+    deps: CtxExpandToolDeps,
+    directory: string,
+    targetSessionId: string,
+    mode: CtxExpandMode,
+    extraVerbose: boolean,
+): Promise<string> {
+    if (mode.kind === "error") return mode.message;
+    if (mode.kind === "tag") {
+        return "Error: tag lookup is session-local — tags and their attachments are not archived — so ctx_expand cannot expand a tag of another session. Use message=<ordinal> or start=<ordinal>, end=<ordinal> against that session instead.";
+    }
+    if ((mode.kind === "range" && mode.verbose) || (mode.kind === "message" && extraVerbose)) {
+        return "Error: verbose ranges are not available for cross-session expand (the search archive holds indexed text, not per-part previews). Use start/end without verbose, or message=<ordinal>.";
+    }
+    if (!deps.resolveProjectPath) {
+        return "Error: cross-session expand is unavailable in this host: no project-identity resolver is wired for ctx_expand. No content was returned.";
+    }
+    const ownership = checkCrossSessionExpandOwnership(
+        deps.db,
+        deps.resolveProjectPath,
+        directory,
+        targetSessionId,
+    );
+    if (!ownership.ok) return ownership.error;
+    const start = mode.kind === "message" ? mode.message : mode.start;
+    const end = mode.kind === "message" ? mode.message : mode.end;
+    if (ownership.notBeforeMs !== undefined) {
+        // The target changed project at some point; rows indexed before the
+        // move belong to its previous project and must not leak into this one.
+        // The gate refuses up front, so the off-thread archive read below is
+        // never asked to serve a gated range.
+        const attribution = checkCrossSessionRangeAttribution(
+            deps.db,
+            targetSessionId,
+            start,
+            end,
+            ownership.notBeforeMs,
+        );
+        if (attribution.kind === "refuse") return attribution.error;
+    }
+    const archived = await renderSearchArchiveOffThread(
+        deps.db,
+        targetSessionId,
+        start,
+        end,
+        CTX_EXPAND_TOKEN_BUDGET,
+        true,
+    );
+    if (!archived.text) return crossSessionEmptyArchiveMessage(targetSessionId, start, end);
+    return relabelCrossSessionArchive(archived.text, targetSessionId, archived.truncated);
 }
 
 export function createCtxExpandTools(deps: CtxExpandToolDeps): Record<string, ToolDefinition> {

@@ -1,8 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import type { UnifiedSearchResult } from "../../features/magic-context/search";
+import type {
+    MessageSearchResult,
+    ReservedSearchCandidates,
+    UnifiedSearchResult,
+} from "../../features/magic-context/search";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { Database } from "../../shared/sqlite";
-import { buildTransientMaterial } from "./transient-material";
+import {
+    buildReservedHits,
+    buildTransientMaterial,
+    detectDateIntent,
+    renderReservedAppendix,
+    withReservedAppendix,
+} from "./transient-material";
 
 const sessionId = "ses-material";
 const query = "sqlite";
@@ -16,8 +26,12 @@ function primer(id: number, content = "primer preview"): UnifiedSearchResult {
 function note(id: number, content = "note preview"): UnifiedSearchResult {
     return { source: "note", content, score: 1, noteId: id, status: "active", createdAt: 1767225600000, anchorOrdinal: null, sourceSessionId: null };
 }
-function message(ordinal: number): UnifiedSearchResult {
-    return { source: "message", content: "fallback preview", score: 1, messageOrdinal: ordinal, messageId: `m${ordinal}`, role: "user" };
+function message(ordinal: number, ownerSession: string = sessionId): UnifiedSearchResult {
+    return {
+        source: "message", content: "fallback preview", score: 1,
+        messageOrdinal: ordinal, messageId: `m${ordinal}`, role: "user",
+        sessionId: ownerSession, messageTimeMs: null,
+    };
 }
 function compartment(): UnifiedSearchResult {
     return { source: "compartment", content: "preview", score: 1, compartmentId: 7, sessionId, title: "Archived conversation", startOrdinal: 4, endOrdinal: 12, matchType: "hybrid", snippet: "SECRET BODY" };
@@ -143,5 +157,281 @@ describe("buildTransientMaterial", () => {
     it("returns null when there are no non-memory hits", () => {
         expect(build([])).toBeNull();
         expect(build([{ source: "memory", memoryId: 1, category: "OPS_RULES", content: "memory", score: 1, matchType: "fts" }])).toBeNull();
+    });
+});
+
+
+const reservedTimeMs = 1767225600000;
+
+function reservedMessage(
+    ordinal: number,
+    owner: string,
+    timeMs: number | null = reservedTimeMs,
+    content?: string,
+    messageId: string = `m${ordinal}`,
+): MessageSearchResult {
+    return {
+        source: "message",
+        content: content ?? `reserved body ${ordinal}`,
+        score: 1,
+        messageOrdinal: ordinal,
+        messageId,
+        role: "user",
+        sessionId: owner,
+        messageTimeMs: timeMs,
+    };
+}
+
+function reservedGit(id: number, content?: string): UnifiedSearchResult {
+    return {
+        source: "git_commit",
+        content: content ?? `git subject ${id}`,
+        score: 1,
+        sha: `sha${id}`,
+        shortSha: `s${id}`,
+        author: null,
+        committedAtMs: reservedTimeMs,
+        matchType: "fts",
+    };
+}
+
+function candidatesOf(partial: Partial<ReservedSearchCandidates>): ReservedSearchCandidates {
+    return {
+        messages: [],
+        gitCommits: [],
+        currentSessionMessages: [],
+        ...partial,
+    };
+}
+
+describe("reserved hits", () => {
+    let db: Database;
+    beforeEach(() => {
+        db = new Database(":memory:");
+        db.exec(`
+            CREATE TABLE git_commits (sha TEXT PRIMARY KEY, message TEXT);
+            CREATE TABLE message_history_fts (session_id TEXT, message_ordinal INTEGER, message_id TEXT, content TEXT);
+            CREATE TABLE message_fts_rowid_map (session_id TEXT, message_ordinal INTEGER, fts_rowid INTEGER, message_time_ms INTEGER, PRIMARY KEY(session_id, message_ordinal));
+        `);
+    });
+    afterEach(() => db.close());
+
+    it("populates reserved hits with identity, time and a capped snippet, and stays empty without candidates", () => {
+        const longBody = "x".repeat(250);
+        const fiveMessages = Array.from({ length: 5 }, (_, i) =>
+            reservedMessage(i + 1, `ses-reserved-${i + 1}`),
+        );
+        const fiveGit = Array.from({ length: 5 }, (_, i) => reservedGit(i + 1));
+        const material = buildTransientMaterial({
+            db,
+            sessionId: "ses-material",
+            query: "sqlite",
+            results: [...fiveMessages, ...fiveGit],
+            budgetTokens: 5000,
+            reservedCandidates: candidatesOf({
+                messages: fiveMessages,
+                gitCommits: fiveGit,
+                currentSessionMessages: [reservedMessage(9, "ses-material")],
+            }),
+        })!;
+        // Up to 3 message hits + 3 git hits; the two message lanes merge
+        // (current-session hits fill any message slots the project lane left).
+        expect(material.reserved.messages).toHaveLength(3);
+        expect(material.reserved.gitCommits).toHaveLength(3);
+        const [first] = material.reserved.messages;
+        expect(first?.sessionId).toBe("ses-reserved-1");
+        expect(first?.messageOrdinal).toBe(1);
+        expect(first?.messageTimeMs).toBe(reservedTimeMs);
+        // Reserved hits are never injected into the model input.
+        expect(material.text).not.toContain("ses-reserved-1");
+
+        const withLongSnippet = buildReservedHits(
+            db,
+            "sqlite",
+            candidatesOf({ messages: [reservedMessage(1, "ses-long", reservedTimeMs, longBody)] }),
+        );
+        expect(Array.from(withLongSnippet.messages[0]!.snippet)).toHaveLength(200);
+        expect(withLongSnippet.messages[0]!.snippet.endsWith("…")).toBe(true);
+
+        const withNullTime = buildReservedHits(
+            db,
+            "sqlite",
+            candidatesOf({ messages: [reservedMessage(2, "ses-null-time", null)] }),
+        );
+        expect(withNullTime.messages[0]!.messageTimeMs).toBeNull();
+
+        // A hit present in both lanes counts once.
+        const shared = reservedMessage(4, "ses-shared");
+        const deduped = buildReservedHits(
+            db,
+            "sqlite",
+            candidatesOf({ messages: [shared], currentSessionMessages: [shared] }),
+        );
+        expect(deduped.messages).toHaveLength(1);
+
+        expect(buildReservedHits(db, "sqlite", undefined)).toEqual({ messages: [], gitCommits: [] });
+        const noCandidates = buildTransientMaterial({
+            db,
+            sessionId: "ses-material",
+            query: "sqlite",
+            results: [reservedGit(1)],
+            budgetTokens: 500,
+        })!;
+        expect(noCandidates.reserved).toEqual({ messages: [], gitCommits: [] });
+    });
+
+    it("renders the appendix with short session id, ISO date, verbatim expand hint and git subject cap", () => {
+        const reserved = buildReservedHits(
+            db,
+            "sqlite",
+            candidatesOf({
+                messages: [reservedMessage(7, "ses-reserved-full")],
+                gitCommits: [reservedGit(1, `${"g".repeat(200)} tail`)],
+            }),
+        );
+        const appendix = renderReservedAppendix(reserved);
+        expect(appendix.startsWith("保留命中：")).toBe(true);
+        expect(appendix).toContain(
+            `- [message] ses-rese 2026-01-01T00:00:00.000Z reserved body 7`,
+        );
+        // Cross-seam contract with ctx_expand: this exact form, full session id.
+        expect(appendix).toContain('ctx_expand(sessionId: "ses-reserved-full", message: 7)');
+        const gitLine = appendix.split("\n").find((line) => line.startsWith("- [git_commit]"))!;
+        expect(gitLine.startsWith("- [git_commit] s1 2026-01-01T00:00:00.000Z ")).toBe(true);
+        expect(Array.from(gitLine.split(".000Z ")[1]!)).toHaveLength(120);
+        expect(gitLine.endsWith("…")).toBe(true);
+    });
+
+    it("caps the appendix at 3 message hits + 3 git hits", () => {
+        const reserved = buildReservedHits(
+            db,
+            "sqlite",
+            candidatesOf({
+                messages: Array.from({ length: 5 }, (_, i) =>
+                    reservedMessage(i + 1, `ses-many-${i + 1}`),
+                ),
+                gitCommits: Array.from({ length: 5 }, (_, i) => reservedGit(i + 1)),
+            }),
+        );
+        const appendix = renderReservedAppendix(reserved);
+        const bullets = appendix.split("\n").filter((line) => line.startsWith("- "));
+        expect(bullets).toHaveLength(6);
+        expect(appendix.match(/ctx_expand\(sessionId:/g)).toHaveLength(3);
+        expect(renderReservedAppendix({ messages: [], gitCommits: [] })).toBe("");
+        expect(
+            withReservedAppendix("text", { messages: [], gitCommits: [] }, "sqlite"),
+        ).toBe("text");
+    });
+
+    it("renders ? for a null message time in the appendix", () => {
+        const appendix = renderReservedAppendix(
+            buildReservedHits(
+                db,
+                "sqlite",
+                candidatesOf({ messages: [reservedMessage(3, "ses-null-t", null)] }),
+            ),
+        );
+        expect(appendix).toContain("- [message] ses-null ? reserved body 3");
+    });
+
+    it("detects zh/en relative-date words only", () => {
+        for (const intentQuery of [
+            "昨天 改了什么", "今晚的构建", "上周的提交", "前天", "本周", "这周",
+            "what broke yesterday", "today's build", "tonight", "last night", "last week", "this week",
+        ]) {
+            expect(detectDateIntent(intentQuery)).toBe(true);
+        }
+        for (const plainQuery of ["sqlite 路径", "daylight savings", "containment", "birthday"]) {
+            expect(detectDateIntent(plainQuery)).toBe(false);
+        }
+        expect(detectDateIntent("stale today?")).toBe(true);
+    });
+
+    it("orders git first in material inclusion and in the appendix under date intent", () => {
+        const hits: UnifiedSearchResult[] = [
+            reservedMessage(10, "ses-material"),
+            reservedGit(1),
+            message(11),
+        ];
+        const dateQuery = "昨天 sqlite";
+        const intentMaterial = buildTransientMaterial({
+            db,
+            sessionId: "ses-material",
+            query: dateQuery,
+            results: hits,
+            budgetTokens: 5000,
+            reservedCandidates: candidatesOf({
+                messages: [reservedMessage(10, "ses-material")],
+                gitCommits: [reservedGit(1)],
+            }),
+        })!;
+        expect(intentMaterial.text.indexOf("[git_commit]")).toBeLessThan(
+            intentMaterial.text.indexOf("[message]"),
+        );
+        const intentAppendix = renderReservedAppendix(intentMaterial.reserved, {
+            dateIntent: detectDateIntent(dateQuery),
+        });
+        expect(intentAppendix.indexOf("- [git_commit]")).toBeLessThan(
+            intentAppendix.indexOf("- [message]"),
+        );
+        // Without date intent the message hits lead, both in material and appendix.
+        const plainMaterial = buildTransientMaterial({
+            db,
+            sessionId: "ses-material",
+            query: "sqlite",
+            results: hits,
+            budgetTokens: 5000,
+            reservedCandidates: candidatesOf({
+                messages: [reservedMessage(10, "ses-material")],
+                gitCommits: [reservedGit(1)],
+            }),
+        })!;
+        expect(plainMaterial.text.indexOf("[message]")).toBeLessThan(
+            plainMaterial.text.indexOf("[git_commit]"),
+        );
+        const plainAppendix = renderReservedAppendix(plainMaterial.reserved);
+        expect(plainAppendix.indexOf("- [message]")).toBeLessThan(
+            plainAppendix.indexOf("- [git_commit]"),
+        );
+    });
+
+    it("resolves each reserved hit's body and time against its own session", () => {
+        // Two sessions share message id "dup" AND ordinal 1; only a lookup
+        // under each hit's own session keeps the snippets and times apart.
+        const alphaTime = 1767225600000;
+        const betaTime = 1767312000000;
+        db.prepare("INSERT INTO message_history_fts(rowid, session_id, message_ordinal, message_id, content) VALUES (1, 'ses-alpha', 1, 'dup', 'alpha own needle text')").run();
+        db.prepare("INSERT INTO message_history_fts(rowid, session_id, message_ordinal, message_id, content) VALUES (2, 'ses-beta', 1, 'dup', 'beta own needle text')").run();
+        db.prepare("INSERT INTO message_fts_rowid_map VALUES ('ses-alpha', 1, 1, ?)").run(alphaTime);
+        db.prepare("INSERT INTO message_fts_rowid_map VALUES ('ses-beta', 1, 2, ?)").run(betaTime);
+        const hitA = reservedMessage(1, "ses-alpha", alphaTime, "alpha preview", "dup");
+        const hitB = reservedMessage(1, "ses-beta", betaTime, "beta preview", "dup");
+        const reserved = buildReservedHits(db, "needle", candidatesOf({ messages: [hitA, hitB] }));
+        expect(reserved.messages[0]?.messageTimeMs).toBe(alphaTime);
+        expect(reserved.messages[0]?.snippet).toContain("alpha own needle text");
+        expect(reserved.messages[0]?.snippet).not.toContain("beta");
+        expect(reserved.messages[1]?.messageTimeMs).toBe(betaTime);
+        expect(reserved.messages[1]?.snippet).toContain("beta own needle text");
+        expect(reserved.messages[1]?.snippet).not.toContain("alpha");
+        const appendix = renderReservedAppendix(reserved);
+        expect(appendix).toContain(new Date(alphaTime).toISOString());
+        expect(appendix).toContain(new Date(betaTime).toISOString());
+        expect(appendix).toContain('ctx_expand(sessionId: "ses-alpha", message: 1)');
+        expect(appendix).toContain('ctx_expand(sessionId: "ses-beta", message: 1)');
+    });
+
+    it("a stale rowid-map row pointing at another session's row misses instead of leaking", () => {
+        // ses-alpha's map claims fts rowid 1, which belongs to ses-beta, and
+        // ses-alpha has no FTS row of its own: the join must not return
+        // ses-beta's content; the lookup falls back to the hit's preview.
+        db.prepare("INSERT INTO message_history_fts(rowid, session_id, message_ordinal, message_id, content) VALUES (1, 'ses-beta', 1, 'dup', 'beta secret needle text')").run();
+        db.prepare("INSERT INTO message_fts_rowid_map VALUES ('ses-alpha', 1, 1, 1767225600000)").run();
+        const hit = reservedMessage(1, "ses-alpha", 1767225600000, "alpha preview", "dup");
+        const reserved = buildReservedHits(db, "needle", candidatesOf({ messages: [hit] }));
+        expect(reserved.messages[0]?.snippet).not.toContain("beta secret");
+        expect(reserved.messages[0]?.snippet).toContain("alpha preview");
+        const appendix = renderReservedAppendix(reserved);
+        expect(appendix).not.toContain("beta secret");
+        expect(appendix).toContain("alpha preview");
     });
 });

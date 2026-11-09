@@ -207,6 +207,9 @@ export interface AutoSearchWorkerInput {
         | "searchMessageHistory"
         | "stepTimings"
         | "onAutoSearchDiagnostics"
+        // A callback is not structured-cloneable; the reserved-candidate
+        // channel is an owner-side explicit-fusion concern only.
+        | "collectReservedCandidates"
     >;
     embeddingRuntimeEnabled: boolean;
     embeddingHostBusy: boolean;
@@ -535,6 +538,7 @@ async function executeAutoSearchWorker(
         searchMessageHistory: _searchMessageHistory,
         stepTimings: _stepTimings,
         onAutoSearchDiagnostics: _onAutoSearchDiagnostics,
+        collectReservedCandidates: _collectReservedCandidates,
         ...serializable
     } = options;
     const lifecycle = registerAutoSearchWork(sessionId);
