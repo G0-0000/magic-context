@@ -86,6 +86,9 @@ export async function registerTools(
             db,
             expandTools: config.historian?.expand_tools,
             transformMode: config.transform_mode,
+            // Cross-session expand's ownership gate resolves the caller's
+            // project from the session workspace, like ctx_search/ctx_note.
+            resolveProjectPath: project.resolveProjectPath,
         }),
         ...createCtxNoteTools({
             ...project,

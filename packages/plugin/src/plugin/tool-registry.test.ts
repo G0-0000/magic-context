@@ -100,7 +100,7 @@ describe("createToolRegistry — memory gating", () => {
         const tools = buildRegistry(RUNNABLE_DREAMER);
         const expectedFields: Record<string, string[]> = {
             ctx_reduce: ["drop"],
-            ctx_expand: ["start", "end", "verbose", "message", "tag"],
+            ctx_expand: ["start", "end", "verbose", "message", "tag", "sessionId"],
             ctx_note: [
                 "action",
                 "content",

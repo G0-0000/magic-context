@@ -1,7 +1,7 @@
 export const CTX_SEARCH_TOOL_NAME = "ctx_search";
 export const CTX_SEARCH_DESCRIPTION = `Search the archive — everything that ever happened in this project, not just what is on your desk.
 
-Retrieval fuses meaning and exact words. Phrase \`query\` as a natural-language question with expected terms (paths, symbols, config keys, errors); keyword stacks find less.
+Retrieval fuses meaning and exact words. Phrase \`query\` as a natural-language question with expected terms (paths, symbols, config keys, errors); keyword stacks find less. Chinese has no word segmenter: use 2-4 character terms ("备份 安装位"), never a whole-sentence Chinese question — it matches nothing in the lexical lane.
 - "where is the opencode source code path?"
 - "why did we choose SQLite over postgres?"
 - "how does the dreamer lease work?"

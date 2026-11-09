@@ -24,6 +24,7 @@ import {
     RERANK_MODEL,
     type RerankSession,
     rerankSearchResults,
+    searchResultKey,
 } from "./search-rerank";
 import { initializeDatabase } from "./storage-db";
 
@@ -175,9 +176,53 @@ test("RRF stable lane order, duplicate votes and message containment match the s
         content: "message",
         role: "user",
         score: 1,
+        sessionId: "s",
+        messageTimeMs: null,
     }));
     lanes.chunk_vector = [compartment];
     expect(fuseSearchLanes(lanes)).toEqual([compartment, hit(1), hit(2)]);
+});
+
+test("RRF keys and compartment containment never cross sessions", () => {
+    const lanes = emptySearchLanes();
+    const compartment: UnifiedSearchResult = {
+        source: "compartment",
+        compartmentId: 9,
+        sessionId: "s",
+        startOrdinal: 1,
+        endOrdinal: 10,
+        title: "compartment",
+        content: "compartment",
+        score: 1,
+        matchType: "semantic",
+    };
+    const ownMessage: UnifiedSearchResult = {
+        source: "message",
+        sessionId: "s",
+        messageId: "m1",
+        messageOrdinal: 5,
+        content: "own",
+        role: "user",
+        score: 1,
+        messageTimeMs: null,
+    };
+    // Same message id AND same ordinal, but another session's message.
+    const foreignMessage: UnifiedSearchResult = {
+        source: "message",
+        sessionId: "other",
+        messageId: "m1",
+        messageOrdinal: 5,
+        content: "foreign",
+        role: "user",
+        score: 1,
+        messageTimeMs: null,
+    };
+    expect(searchResultKey(ownMessage)).not.toBe(searchResultKey(foreignMessage));
+    lanes.message_fts = [ownMessage, foreignMessage];
+    lanes.chunk_vector = [compartment];
+    // The own-session message votes for the compartment; the foreign-session
+    // message stays a separate hit instead of merging or fusing away.
+    expect(fuseSearchLanes(lanes)).toEqual([compartment, foreignMessage]);
 });
 
 test("candidate recipe preserves UTF-8 and its byte budgets", () => {
@@ -449,4 +494,50 @@ test("message lane capture preserves arm A scores, probes and ordinal filters", 
             expect(after.laneResults?.every((row) => row.messageOrdinal <= 80)).toBe(true);
         }
     }
+});
+
+test("candidateTexts validates the fts row's session against a stale rowid map", () => {
+    // Seed without the shared store() helper: this environment cannot load
+    // the inserted memory row that helper writes (storage-memory.ts:604), a
+    // pre-existing failure. FTS rows + the rowid map are all this test needs.
+    const database = new Database(":memory:");
+    initializeDatabase(database);
+    ensureMessagesIndexed(database, "ses-a", () => [
+        {
+            ordinal: 1,
+            id: "dup",
+            role: "assistant",
+            parts: [{ type: "text", text: "alpha body" }],
+        },
+    ]);
+    ensureMessagesIndexed(database, "ses-b", () => [
+        {
+            ordinal: 1,
+            id: "dup",
+            role: "assistant",
+            parts: [{ type: "text", text: "beta body" }],
+        },
+    ]);
+    // Corrupt the map: ses-b's entry now points at ses-a's physical FTS row.
+    // A hit claiming sessionId ses-b must still read ses-b's own content.
+    const foreign = database
+        .prepare("SELECT rowid FROM message_history_fts WHERE session_id = 'ses-a'")
+        .get() as { rowid: number };
+    database
+        .prepare("UPDATE message_fts_rowid_map SET fts_rowid = ? WHERE session_id = 'ses-b'")
+        .run(foreign.rowid);
+
+    const hit: UnifiedSearchResult = {
+        source: "message",
+        content: "beta body",
+        score: 1,
+        messageOrdinal: 1,
+        messageId: "dup",
+        role: "assistant",
+        sessionId: "ses-b",
+        messageTimeMs: null,
+    };
+    const [text] = candidateTexts(database, "ses-a", "git:test", [hit]);
+    expect(text).toContain("beta body");
+    expect(text).not.toContain("alpha body");
 });

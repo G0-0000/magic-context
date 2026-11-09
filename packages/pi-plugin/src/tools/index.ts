@@ -245,7 +245,11 @@ export function registerMagicContextTools(
 
 		pi.registerTool(
 			surfaceTool(
-				createCtxExpandTool({ db: opts.db, expandTools: opts.expandTools }),
+				createCtxExpandTool({
+					db: opts.db,
+					expandTools: opts.expandTools,
+					resolveProjectIdentity: opts.resolveProjectIdentity,
+				}),
 			),
 		);
 	}

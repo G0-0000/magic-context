@@ -28,10 +28,18 @@ interface Request {
 
 type Reply =
     | { kind: "v2-archive-ready" }
-    | { kind: "v2-archive-result"; id: number; text: string | null; error?: string };
+    | { kind: "v2-archive-result"; id: number; text: string | null; truncated: boolean; error?: string };
+
+/** The archive-read reply shape: the recovered text plus the renderer's own
+ *  truncation decision, so relabeling never string-matches the continuation
+ *  hint (archive content can contain a byte-identical line). */
+export interface V2ArchiveReadResult {
+    text: string | null;
+    truncated: boolean;
+}
 
 interface Pending {
-    resolve(text: string | null): void;
+    resolve(result: V2ArchiveReadResult): void;
     reject(error: Error): void;
     timer: ReturnType<typeof setTimeout>;
 }
@@ -115,7 +123,7 @@ function start(): Promise<void> {
                 clearTimeout(item.timer);
                 if (reply.error)
                     item.reject(new Error(`Search archive worker unavailable: ${reply.error}`));
-                else item.resolve(reply.text);
+                else item.resolve({ text: reply.text ?? null, truncated: reply.truncated });
                 if (pending.size === 0) {
                     idle = setTimeout(() => {
                         void stopV2ArchiveReader();
@@ -134,13 +142,13 @@ export async function readV2ArchiveOffThread(
     rawPath: string,
     sessionId: string,
     read: ArchiveRead,
-): Promise<string | null> {
+): Promise<V2ArchiveReadResult> {
     try {
         clearTimeout(idle);
         await start();
         const current = worker;
         if (!current) throw new Error("Search archive worker unavailable: reader stopped");
-        return await new Promise<string | null>((resolve, reject) => {
+        return await new Promise<V2ArchiveReadResult>((resolve, reject) => {
             const id = ++nextId;
             const timer = setTimeout(() => {
                 void stopV2ArchiveReader();
@@ -183,7 +191,7 @@ export async function serveV2ArchiveReads(
         { createV2RawMessageReader, createV2RawMessageProvider },
         { setBoundedRawMessageProvider },
         { renderItemByTag, renderMessageByOrdinal, renderVerboseRangeForTool },
-        { renderSearchArchive },
+        { renderSearchArchiveWithStatus },
         { createV2RecoveryAttachments },
     ] = await Promise.all([
         import("../../shared/sqlite"),
@@ -220,12 +228,13 @@ export async function serveV2ArchiveReads(
             );
             const read = request.read;
             let text: string | null;
+            let truncated = false;
             if (read.kind === "tag") {
                 text = renderItemByTag(db, request.sessionId, read.tag, "part", attachments);
             } else {
                 const start = read.kind === "message" ? read.message : read.start;
                 const end = read.kind === "message" ? read.message : read.end;
-                text = renderSearchArchive(
+                const rendered = renderSearchArchiveWithStatus(
                     db,
                     request.sessionId,
                     start,
@@ -234,8 +243,12 @@ export async function serveV2ArchiveReads(
                     read.kind === "archive" && read.archiveOnly,
                     () => reader.ordinalMapForRange(request.sessionId, start, end),
                 );
+                text = rendered?.text ?? null;
+                truncated = rendered?.truncated ?? false;
+                // Recovery fallbacks never append the archive continuation hint.
                 if (text === null && read.kind === "message") {
                     text = renderMessageByOrdinal(request.sessionId, read.message, attachments);
+                    truncated = false;
                 } else if (text === null && read.kind === "verbose") {
                     text = renderVerboseRangeForTool(
                         request.sessionId,
@@ -245,11 +258,18 @@ export async function serveV2ArchiveReads(
                         read.expandTools,
                         attachments,
                     );
+                    truncated = false;
                 }
             }
-            reply = { kind: "v2-archive-result", id: request.id, text };
+            reply = { kind: "v2-archive-result", id: request.id, text, truncated };
         } catch (error) {
-            reply = { kind: "v2-archive-result", id: request.id, text: null, error: String(error) };
+            reply = {
+                kind: "v2-archive-result",
+                id: request.id,
+                text: null,
+                truncated: false,
+                error: String(error),
+            };
         } finally {
             unregister?.();
             rawReader?.close();

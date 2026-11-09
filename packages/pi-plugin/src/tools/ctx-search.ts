@@ -31,6 +31,7 @@ import {
 	parseIdShapedQuery,
 	resolveMemoriesByIdsForSearch,
 	unifiedSearch,
+	type ReservedSearchCandidates,
 } from "@magic-context/core/features/magic-context/search";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
@@ -52,7 +53,12 @@ import {
 	tryStrataAskDetailed,
 	type StrataAskConnection,
 } from "@magic-context/core/tools/ctx-search/strata-ask";
-import { buildTransientMaterial } from "@magic-context/core/tools/ctx-search/transient-material";
+import {
+	buildReservedHits,
+	buildTransientMaterial,
+	withReservedAppendix,
+	type TransientMaterial,
+} from "@magic-context/core/tools/ctx-search/transient-material";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 import { loadPiConfigDetailed } from "../config";
@@ -211,7 +217,7 @@ export function createCtxSearchTool(
 			const sessionId = ctx.sessionManager.getSessionId();
 			const runClassic = async (overrides?: {
 				sources?: CtxSearchParams["sources"];
-			}) => {
+			}, collectReserved?: (candidates: ReservedSearchCandidates) => void) => {
 				const projectIdentity = resolveProjectForCall();
 				if (!projectIdentity) {
 					return {
@@ -311,6 +317,9 @@ export function createCtxSearchTool(
 						gitRepositoryAvailable: directoryHasGitMetadata(ctx.cwd),
 						// Explicit agent search enables literal-probe multi-query recall.
 						explicitSearch: true,
+						// Reserved candidates feed the deterministic post-model appendix
+						// on the fusion route only; plain classic calls never collect them.
+						...(collectReserved ? { collectReservedCandidates: collectReserved } : {}),
 						rerankConnectionFile: deps.rerankConnectionFile,
 						rerankConfig: deps.rerankConfig,
 						// Cancellation also stops history-chunk pool building.
@@ -369,19 +378,26 @@ export function createCtxSearchTool(
 						// readable, reuses that exact result. A status the cache cannot
 						// carry at all fails the query to the FULL classic search instead —
 						// memories included (see below).
-						const classic = await runClassic({
-							sources: params.sources?.filter((source) => source !== "memory") ?? ["git_commit", "primer", "note", "message"],
-						});
+						let reservedCandidates: ReservedSearchCandidates | undefined;
+						const classic = await runClassic(
+							{
+								sources: params.sources?.filter((source) => source !== "memory") ?? ["git_commit", "primer", "note", "message"],
+							},
+							(candidates) => {
+								reservedCandidates = candidates;
+							},
+						);
 						if (!classic.ok) return wrap(classic.text, true);
-						let transient: string | undefined;
+						let material: TransientMaterial | null = null;
 						try {
-							transient = buildTransientMaterial({
+							material = buildTransientMaterial({
 								db: deps.db,
 								sessionId,
 								query,
 								results: classic.results,
 								budgetTokens: connection.transientBudgetTokens,
-							})?.text;
+								reservedCandidates,
+							});
 						} catch (error) {
 							const reason = (error instanceof Error ? error.message : String(error))
 								.replace(/[\r\n]+/g, " ");
@@ -392,6 +408,13 @@ export function createCtxSearchTool(
 							}
 							return wrap(classic.text);
 						}
+						const transient = material?.text;
+						// The appendix rides even a null material: reserved hits survive
+						// truncation, so the pre-run may have candidates while its final
+						// result list is empty.
+						const reserved = material
+							? material.reserved
+							: buildReservedHits(deps.db, query, reservedCandidates);
 						const answer = await tryStrataAskDetailed({
 							query,
 							config: connection,
@@ -401,7 +424,8 @@ export function createCtxSearchTool(
 							allowExternalRefs: true,
 						});
 						if (answer.status === "answered") {
-							return wrap(params.sources ? mixedSourcesAnswer(answer.text) : answer.text);
+							const base = params.sources ? mixedSourcesAnswer(answer.text) : answer.text;
+							return wrap(withReservedAppendix(base, reserved, query));
 						}
 						// The pre-run never searched memories and is not authoritative
 						// without the ledger's changes, so an unavailable status means
@@ -409,6 +433,9 @@ export function createCtxSearchTool(
 						if (answer.status === "failed" && ["status_unavailable", "http_409", "http_400"].includes(answer.reason)) {
 							const full = await runClassic();
 							return wrap(full.text, !full.ok);
+						}
+						if (answer.status === "miss") {
+							return wrap(withReservedAppendix(classic.text, reserved, query));
 						}
 						return wrap(classic.text);
 					}

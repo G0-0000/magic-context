@@ -1,6 +1,6 @@
 {
-  "generation": "c662899c508c6fe0e18a6c6ca10c0ff4657037d9aa33063c74fc7ed17c5f850b",
-  "catalog_digest": "c662899c508c6fe0e18a6c6ca10c0ff4657037d9aa33063c74fc7ed17c5f850b",
+  "generation": "fb9194d7262e426c0ac5ea868959d2826f48c24034f96600ca4c32998b5989a7",
+  "catalog_digest": "fb9194d7262e426c0ac5ea868959d2826f48c24034f96600ca4c32998b5989a7",
   "composition_digest": "4f419cf9a5a1a35380ef9ce2dbf1452e9e1f8f137218053ac076174a389df77e",
   "tools": [
     {
@@ -14,7 +14,7 @@
       "capabilities": [
         "magic-context:notes/v1"
       ],
-      "description": "Session notes are pending intentions: work you intend to return to, with findings attached (\"take a note\" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a point in time) with nothing you intend to do about it — that goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update changes one; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds.",
+      "description": "Session notes are pending intentions: work you intend to return to, with findings attached (\"take a note\" always qualifies). Not active steps, an executing plan, or restart insurance; a record of how things stand (world-state, a design at a time) with nothing to do about it goes stale silently; a fact worth keeping is memory, the rest is nothing. First line = title (<80 chars). write saves; read lists rows (note_ids for bodies); update changes one; dismiss retires 1–50. Dismiss a note when its work lands or is abandoned; a queue you never dismiss from stops being read. surface_condition parks it until an outside check against repo files, git, GitHub or the web holds.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -88,7 +88,7 @@
       "capabilities": [
         "magic-context:memory.write/v1"
       ],
-      "description": "Durable facts about this project, shared with every agent on it and kept for the months this work lasts; active ones are already in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category optional); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status.",
+      "description": "Durable facts about this project, shared with every agent on it and kept for months; active ones are in <project-memory> as `#id: fact`. Write one standalone fact when it must not have to be found again — a rule, an architecture fact, a constraint, a config value, a naming convention — especially what cost you turns. A pending intention with evidence is ctx_note, not memory. write (content + category); update one id (content; category optional); archive one or more ids (reason optional); merge two or more ids (content); get 1–20 ids in any status.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -148,7 +148,7 @@
       "capabilities": [
         "magic-context:archive.search/v1"
       ],
-      "description": "Search the archive. Classic retrieval filters memories already in <project-memory> and the live tail. Phrase query as a natural-language question with expected terms. Sources (omit for all): memory (rules), message (compacted conversation; ordinals for ctx_expand), git_commit (commits), primer (project Q&A), note (follow-ups). Memory ids alone resolve directly; from/to restrict all sources to inclusive UTC dates.\nWhen enabled on OpenCode/Pi, queries without sources and sources containing memory plus other sources may synthesize memory and selected non-memory summaries; memory may already be visible. Mixed sources query classic with memory removed before synthesis. sources:[\"memory\"] queries the bank directly (miss is terminal). Sources without memory (including []), from/to, and id use classic; limit still routes to the cache and bounds only classic material and the fallback, not the synthesized answer. The Rust module's own ctx_search always uses classic retrieval.",
+      "description": "Search the archive. Classic retrieval filters memories already in <project-memory> and the live tail. Phrase a question with expected terms; Chinese: 2-4 char terms, not a full sentence. Sources (omit for all): memory (rules), message (compacted; ordinals for ctx_expand), git_commit (commits), primer (project Q&A), note (follow-ups). Memory ids alone resolve directly; from/to restrict all sources to inclusive UTC dates.\nWith the memory cache on (OpenCode/Pi), source-less or memory+other queries may answer from synthesized memory plus non-memory summaries (memory may already be visible); mixed sources use classic minus memory; sources:[\"memory\"] hits the bank directly (a miss is terminal); [], from/to and id queries go classic; limit still routes to the cache, bounding classic material and fallback only. The Rust module always uses classic.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -197,7 +197,7 @@
   "system_text": {
     "text": "## Magic Context\n\n`ctx_search` searches this project's archive — what earlier sessions said and decided, commits and notes; ask it before asking the user anything that may already be recorded, phrased as a question with the exact names in it. `ctx_memory` pins facts that stay true for the months this work lasts, for you and every agent on the project: what must not have to be found again, especially what cost you turns. They are not shown to you automatically; recall them with `ctx_search`. `ctx_note` is the tray for work you intend to return to, with its findings attached; findings without an intention are not a note; \"take a note\" from the user always goes there.",
     "item_digest": "7ab356879bd31a5af7b0899ff5c41c2d85ea663f35ec05f032a94db23e934726",
-    "preflight_digest": "884540cf133b0313e9181618c1177f040d2ea1c6f584e55cf403418e47cf470e",
+    "preflight_digest": "d3d6956ed0d4d7696604388c3b8532d890903616931c99262478398d9074b185",
     "tool_names": [
       "ctx_memory",
       "ctx_note",

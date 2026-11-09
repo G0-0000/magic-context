@@ -8,7 +8,11 @@ import * as storageMemory from "../../features/magic-context/memory/storage-memo
 import { supersededMemory } from "../../features/magic-context/memory/storage-memory";
 import { indexMessagesAfterOrdinal } from "../../features/magic-context/message-index";
 import { runMigrations } from "../../features/magic-context/migrations";
-import type { UnifiedSearchResult } from "../../features/magic-context/search";
+import type {
+    GitCommitSearchResult,
+    MessageSearchResult,
+    UnifiedSearchResult,
+} from "../../features/magic-context/search";
 import * as searchModule from "../../features/magic-context/search";
 import { MAX_UNIFIED_SEARCH_LIMIT } from "../../features/magic-context/search";
 import { getOrCreateSessionMeta, queueMemoryMutation } from "../../features/magic-context/storage";
@@ -815,7 +819,7 @@ describe("createCtxSearchTools", () => {
             db.prepare("INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)").run("ses-search", JSON.stringify([evidence.id]));
             const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async (_db, _session, _project, _query, options) => [{
                 source: "message", content: options?.sources?.includes("memory") ? "full archive marker" : "selected archive marker", score: 1,
-                messageOrdinal: 3, messageId: "m3", role: "user",
+                messageOrdinal: 3, messageId: "m3", role: "user", sessionId: "ses-search", messageTimeMs: null,
             }]);
             let mode: "hit" | "miss" | "json-miss" | "invalid" | "failed" | "400" | "409" = "hit";
             let requests = 0;
@@ -914,6 +918,8 @@ describe("createCtxSearchTools", () => {
                     messageOrdinal: 3,
                     messageId: "m3",
                     role: "user",
+                    sessionId: "ses-search",
+                    messageTimeMs: null,
                 },
             ]);
             let chatMessages: Array<{ role: string; content: string }> = [];
@@ -966,6 +972,130 @@ describe("createCtxSearchTools", () => {
                 expect(chatMessages[0]?.content).toContain("sqlite archive marker");
                 expect(chatMessages[0]?.content).toContain(`问题：${query}`);
                 expect(readFileSync(prefixPath, "utf8")).toBe(prefix);
+            } finally {
+                spy.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("appends reserved hits on fusion answered and miss, never on classic fallback or into the model turn", async () => {
+            const messageResult: MessageSearchResult = {
+                source: "message",
+                content: "reserved snippet body",
+                score: 1,
+                messageOrdinal: 7,
+                messageId: "m7",
+                role: "user",
+                sessionId: "ses-reserved-full",
+                messageTimeMs: 1767225600000,
+            };
+            const gitResult: GitCommitSearchResult = {
+                source: "git_commit",
+                content: "reserved commit subject",
+                score: 1,
+                sha: "sha-reserved-1",
+                shortSha: "sres1",
+                author: null,
+                committedAtMs: 1767225600000,
+                matchType: "fts",
+            };
+            const APPENDIX = [
+                "保留命中：",
+                "- [message] ses-rese 2026-01-01T00:00:00.000Z reserved snippet body",
+                '  ctx_expand(sessionId: "ses-reserved-full", message: 7)',
+                "- [git_commit] sres1 2026-01-01T00:00:00.000Z reserved commit subject",
+            ].join("\n");
+            let mode: "hit" | "miss" | "409" = "hit";
+            let chatMessages: Array<{ role: string; content: string }> = [];
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    chatMessages = (
+                        (await req.json()) as { messages: Array<{ role: string; content: string }> }
+                    ).messages;
+                    if (mode === "409") return new Response(null, { status: 409 });
+                    return Response.json({
+                        choices: [
+                            {
+                                message: {
+                                    content:
+                                        mode === "hit"
+                                            ? JSON.stringify({ answer: "保留答案", memoryIds: [] })
+                                            : "记忆库中无",
+                                },
+                            },
+                        ],
+                        session: { splice: { resume_ok: true } },
+                    });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-reserved-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            // Only fusion pre-runs pass the collector; plain classic calls
+            // (sources given or not) never see it.
+            const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+                async (_db, _session, _project, _query, options) => {
+                    if (options?.sources) {
+                        options.collectReservedCandidates?.({
+                            messages: [messageResult],
+                            gitCommits: [gitResult],
+                            currentSessionMessages: [],
+                        });
+                    } else {
+                        expect(options?.collectReservedCandidates).toBeUndefined();
+                    }
+                    return [messageResult, gitResult];
+                },
+            );
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
+            });
+            try {
+                const classicText = await classic([...fusionSources]);
+                const answered = await tools.ctx_search.execute(
+                    { query },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(answered).toBe(
+                    `答案：\n保留答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}\n\n${APPENDIX}`,
+                );
+                // Reserved hits never enter the model turn.
+                expect(chatMessages[0]?.content).not.toContain("保留命中：");
+                expect(chatMessages[0]?.content).not.toContain("ctx_expand(sessionId:");
+                mode = "miss";
+                const missed = await tools.ctx_search.execute(
+                    { query },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(missed).toBe(`${classicText}\n\n${APPENDIX}`);
+                mode = "409";
+                const fullFallback = await tools.ctx_search.execute(
+                    { query },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(fullFallback).toBe(classicText);
+                expect(fullFallback).not.toContain("保留命中：");
+                // Three fusion pre-runs collected candidates; the plain classic
+                // baseline and the full-classic fallback never did.
+                const collectors = spy.mock.calls.map(
+                    (call) =>
+                        (call[4] as { collectReservedCandidates?: unknown } | undefined)
+                            ?.collectReservedCandidates,
+                );
+                expect(collectors.filter(Boolean)).toHaveLength(3);
+                expect(collectors[collectors.length - 1]).toBeUndefined();
             } finally {
                 spy.mockRestore();
                 server.stop(true);
@@ -1082,6 +1212,8 @@ describe("createCtxSearchTools", () => {
                     messageOrdinal: 3,
                     messageId: "m3",
                     role: "user",
+                    sessionId: "ses-search",
+                    messageTimeMs: null,
                 },
             ]);
             const originalPrepare = db.prepare.bind(db);
@@ -1124,6 +1256,8 @@ describe("createCtxSearchTools", () => {
                                   messageOrdinal: 3,
                                   messageId: "m3",
                                   role: "user",
+                                  sessionId: "ses-search",
+                                  messageTimeMs: null,
                               },
                           ]
                         : [
@@ -1343,6 +1477,8 @@ describe("createCtxSearchTools", () => {
                     messageOrdinal: 3,
                     messageId: "m3",
                     role: "user",
+                    sessionId: "ses-search",
+                    messageTimeMs: null,
                 },
             ]);
             const tools = createCtxSearchTools({
