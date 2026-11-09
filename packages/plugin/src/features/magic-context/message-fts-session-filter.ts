@@ -68,6 +68,35 @@ export function withMessageFtsSessionFilter<T>(
     sessionId: string,
     read: (sessionFirst: boolean) => T,
 ): T {
+    return withMessageFtsCoverageFilter(
+        db,
+        (incompleteSessions) => !incompleteSessions.has(sessionId),
+        read,
+    );
+}
+
+/** Session-set variant of {@link withMessageFtsSessionFilter}: the sidecar path
+ *  runs only when EVERY candidate session has all its physical FTS rows mapped.
+ *  Callers keep the ordinary session predicate as the integrity guard and fall
+ *  back to the global MATCH + session filter whenever any candidate is
+ *  incomplete, exactly like the single-session path. */
+export function withMessageFtsSessionSetFilter<T>(
+    db: Database,
+    sessionIds: readonly string[],
+    read: (sessionSetFirst: boolean) => T,
+): T {
+    return withMessageFtsCoverageFilter(
+        db,
+        (incompleteSessions) => !sessionIds.some((sessionId) => incompleteSessions.has(sessionId)),
+        read,
+    );
+}
+
+function withMessageFtsCoverageFilter<T>(
+    db: Database,
+    isComplete: (incompleteSessions: Set<string>) => boolean,
+    read: (sidecarFirst: boolean) => T,
+): T {
     let cacheable = false;
     try {
         const transaction = db as unknown as { inTransaction?: boolean; isTransaction?: boolean };
@@ -79,7 +108,7 @@ export function withMessageFtsSessionFilter<T>(
 
     return db
         .transaction(() => {
-            let sessionFirst = false;
+            let sidecarFirst = false;
             try {
                 const cache = getCoverageCache(db);
                 cache.pin.get();
@@ -100,13 +129,13 @@ export function withMessageFtsSessionFilter<T>(
                         cache.incompleteSessions = incomplete;
                     }
                 }
-                sessionFirst = !incomplete.has(sessionId);
+                sidecarFirst = isComplete(incomplete);
             } catch {
                 // Older/nonstandard FTS tables may omit docsize. Without a physical
                 // coverage proof, the global query remains the completeness authority.
                 coverageCaches.delete(db);
             }
-            return read(sessionFirst);
+            return read(sidecarFirst);
         })
         .deferred();
 }

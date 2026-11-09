@@ -165,6 +165,9 @@ export function createToolRegistry(args: {
             db,
             expandTools: pluginConfig.historian?.expand_tools,
             transformMode: pluginConfig.transform_mode,
+            // Cross-session expand's ownership gate resolves the caller's
+            // project from the call directory, like ctx_search/ctx_note.
+            resolveProjectPath,
         }),
         ...createCtxNoteTools({
             db,

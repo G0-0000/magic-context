@@ -9,7 +9,11 @@ import {
 	updateMemoryStatus,
 } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
+import type {
+	GitCommitSearchResult,
+	MessageSearchResult,
+	UnifiedSearchResult,
+} from "@magic-context/core/features/magic-context/search";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
 import * as storageDb from "@magic-context/core/features/magic-context/storage-db";
 import * as logger from "@magic-context/core/shared/logger";
@@ -469,7 +473,7 @@ describe("createCtxSearchTool", () => {
 		});
 		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async (_db, _session, _project, _query, options) => [{
 			source: "message", content: options?.sources?.includes("memory") ? "full archive marker" : "selected archive marker", score: 1,
-			messageOrdinal: 3, messageId: "m3", role: "user",
+			messageOrdinal: 3, messageId: "m3", role: "user", sessionId: "ses-search", messageTimeMs: null,
 		}]);
 		const common = {
 			db, memoryEnabled: true, embeddingEnabled: false,
@@ -573,7 +577,7 @@ describe("createCtxSearchTool", () => {
 		});
 		const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([{
 			source: "message", content: "sqlite archive marker", score: 1,
-			messageOrdinal: 3, messageId: "m3", role: "user",
+			messageOrdinal: 3, messageId: "m3", role: "user", sessionId: "ses-search", messageTimeMs: null,
 		}]);
 		const fusionSources = ["git_commit", "primer", "note", "message"] as const;
 		const ctx = fakeContext("ses-search", "/repo/pi-strata") as never;
@@ -900,7 +904,7 @@ describe("createCtxSearchTool", () => {
 		});
 		const search = spyOn(searchModule, "unifiedSearch").mockResolvedValue([{
 			source: "message", content: "sqlite archive", score: 1,
-			messageOrdinal: 3, messageId: "m3", role: "user",
+			messageOrdinal: 3, messageId: "m3", role: "user", sessionId: "ses-search", messageTimeMs: null,
 		}]);
 		const originalPrepare = db.prepare.bind(db);
 		const prepare = spyOn(db, "prepare").mockImplementation((sql) => {
@@ -932,7 +936,7 @@ describe("createCtxSearchTool", () => {
 			search.mockImplementation(async (_db, _session, _project, _query, options) =>
 				options?.sources ? [{
 					source: "message", content: "sqlite archive", score: 1,
-					messageOrdinal: 3, messageId: "m3", role: "user",
+					messageOrdinal: 3, messageId: "m3", role: "user", sessionId: "ses-search", messageTimeMs: null,
 				}] : [{
 					source: "memory", content: "sqlite memory hit", score: 1,
 					memoryId: 123, category: "RESEARCH", matchType: "fts",
@@ -1085,6 +1089,107 @@ describe("createCtxSearchTool", () => {
 			server.stop(true);
 			rmSync(prefixDir, { recursive: true, force: true });
 			rmSync(home, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("appends reserved hits on fusion answered and miss, never on classic fallback (Pi parity)", async () => {
+		const db = createTestDb();
+		const prefixDir = mkdtempSync(join(tmpdir(), "mc-pi-strata-reserved-"));
+		const prefixPath = join(prefixDir, "prefix.json");
+		writeFileSync(prefixPath, JSON.stringify([
+			{ role: "system", content: "sys" },
+			{ role: "user", content: "mem" },
+			{ role: "assistant", content: "ack" },
+		]));
+		const messageResult: MessageSearchResult = {
+			source: "message",
+			content: "reserved snippet body",
+			score: 1,
+			messageOrdinal: 7,
+			messageId: "m7",
+			role: "user",
+			sessionId: "ses-reserved-full",
+			messageTimeMs: 1767225600000,
+		};
+		const gitResult: GitCommitSearchResult = {
+			source: "git_commit",
+			content: "reserved commit subject",
+			score: 1,
+			sha: "sha-reserved-1",
+			shortSha: "sres1",
+			author: null,
+			committedAtMs: 1767225600000,
+			matchType: "fts",
+		};
+		const APPENDIX = [
+			"保留命中：",
+			"- [message] ses-rese 2026-01-01T00:00:00.000Z reserved snippet body",
+			'  ctx_expand(sessionId: "ses-reserved-full", message: 7)',
+			"- [git_commit] sres1 2026-01-01T00:00:00.000Z reserved commit subject",
+		].join("\n");
+		let mode: "hit" | "miss" | "409" = "hit";
+		let chatMessages: Array<{ role: string; content: string }> = [];
+		const server = Bun.serve({
+			port: 0, hostname: "127.0.0.1",
+			async fetch(req) {
+				chatMessages = ((await req.json()) as { messages: Array<{ role: string; content: string }> }).messages;
+				if (mode === "409") return new Response(null, { status: 409 });
+				return Response.json({
+					choices: [{ message: { content: mode === "hit" ? JSON.stringify({ answer: "保留答案", memoryIds: [] }) : "记忆库中无" } }],
+					session: { splice: { resume_ok: true } },
+				});
+			},
+		});
+		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+			async (_db, _session, _project, _query, options) => {
+				if (options?.sources) {
+					options.collectReservedCandidates?.({
+						messages: [messageResult],
+						gitCommits: [gitResult],
+						currentSessionMessages: [],
+					});
+				} else {
+					expect(options?.collectReservedCandidates).toBeUndefined();
+				}
+				return [messageResult, gitResult];
+			},
+		);
+		const ctx = fakeContext("ses-search", "/repo/pi-reserved") as never;
+		const query = "where is sqlite";
+		const invoke = async (resolve: boolean) => {
+			const tool = createCtxSearchTool({
+				db, memoryEnabled: false, embeddingEnabled: false,
+				resolveProjectIdentity: () => "git:pi-reserved",
+				resolveStrataAsk: resolve ? () => ({
+					baseUrl: String(server.url).replace(/\/$/, ""), apiKey: "pi-strata-key",
+					apiKeyEnv: null, model: "qwen-test", slotFile: "mc-mem-v1.bin", prefixPath,
+					project: "git:pi-reserved", maxTokens: 64, timeoutMs: 1500, transientBudgetTokens: 1000,
+					contextDocsBudgetTokens: 4000,
+				}) : () => null,
+			});
+			const result = await tool.execute("reserved", { query }, new AbortController().signal, undefined, ctx);
+			return result.content[0]?.text ?? "";
+		};
+		try {
+			const classicText = await invoke(false);
+			expect(await invoke(true)).toBe(
+				`答案：\n保留答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}\n\n${APPENDIX}`,
+			);
+			expect(chatMessages[0]?.content).not.toContain("保留命中：");
+			mode = "miss";
+			expect(await invoke(true)).toBe(`${classicText}\n\n${APPENDIX}`);
+			mode = "409";
+			expect(await invoke(true)).toBe(classicText);
+			const collectors = spy.mock.calls.map(
+				(call) => (call[4] as { collectReservedCandidates?: unknown } | undefined)?.collectReservedCandidates,
+			);
+			expect(collectors.filter(Boolean)).toHaveLength(3);
+			expect(collectors[collectors.length - 1]).toBeUndefined();
+		} finally {
+			spy.mockRestore();
+			server.stop(true);
+			rmSync(prefixDir, { recursive: true, force: true });
 			closeQuietly(db);
 		}
 	});

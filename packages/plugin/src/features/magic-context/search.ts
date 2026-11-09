@@ -33,8 +33,10 @@ import { relaxedFtsQuery, sanitizeFtsQuery } from "./memory/storage-memory-fts";
 import {
     MESSAGE_FTS_SESSION_FILTER_SQL,
     withMessageFtsSessionFilter,
+    withMessageFtsSessionSetFilter,
 } from "./message-fts-session-filter";
 import { getIndexedMessageCorpusSize } from "./message-index";
+import { normalizeStoredProjectPath } from "./memory/project-identity";
 import { getMessageIndexEpoch, isMessageIndexSearchable } from "./message-index-async";
 import { recordShadowMeasurement } from "./search-measurement";
 import {
@@ -90,6 +92,8 @@ interface MessageSearchRow {
     messageId?: string;
     role?: string;
     content?: string;
+    sessionId?: string;
+    messageTimeMs?: number | null;
     suppressedCount?: number;
     summaryOnly?: number;
     ftsRank?: number;
@@ -118,6 +122,12 @@ const sessionFirstMessageSearchDiagnosticStatements = new WeakMap<Database, Prep
 const messageSearchDiagnosticStatementsWithDateRange = new WeakMap<Database, PreparedStatement>();
 const batchedMessageSearchStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
 const batchedFtsCountStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
+const projectWideBatchedMessageSearchStatements = new WeakMap<
+    Database,
+    Map<string, PreparedStatement>
+>();
+const projectWideBatchedFtsCountStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
+const wholeTableMessageCountStatements = new WeakMap<Database, PreparedStatement>();
 
 export type SearchSource = "memory" | "message" | "git_commit" | "primer" | "note";
 
@@ -217,6 +227,15 @@ export interface UnifiedSearchOptions {
      *  in; the auto-search hot path stays single-probe to protect its latency
      *  budget. NL queries with no extractable probes are unaffected either way. */
     explicitSearch?: boolean;
+    /**
+     * Optional reserved-candidate channel for explicit fusion callers only. When
+     * set (and `explicitSearch` is true), unifiedSearch reports up to 5 raw
+     * message-lane hits, up to 5 git-commit hits and up to 5 current-session
+     * message hits — fetched before the global limit slice and rerank, so they
+     * survive truncation. Never called for auto-search or plain explicit
+     * search. The primary return value is unchanged.
+     */
+    collectReservedCandidates?: (candidates: ReservedSearchCandidates) => void;
     /** Disables production search metrics while running an offline shadow quality comparison. */
     measurementDisabled?: boolean;
     embeddingModelIdOverride?: string;
@@ -273,6 +292,14 @@ export interface MessageHistorySearchRequest {
     /** The caller wants diagnostics; this also selects the diagnostic statements. */
     collectDiagnostics: boolean;
     dateRange: { from: number; to: number } | null;
+    /**
+     * Project-wide explicit search: every session eligible for the search,
+     * including `sessionId`. Present only for explicit `ctx_search`; auto-search
+     * and other callers omit it and get the single-session lane. `maxOrdinal`
+     * applies to `sessionId` only — every other session is searched without a
+     * cutoff. Plain data (session-id strings) so a worker message can carry it.
+     */
+    projectSessionIds?: string[];
 }
 
 export interface MessageHistorySearchOutcome {
@@ -286,7 +313,17 @@ export function searchMessageHistory(
     db: Database,
     request: MessageHistorySearchRequest,
 ): MessageHistorySearchOutcome {
-    if (!isMessageIndexSearchable(request.sessionId))
+    // Project-wide lane: each candidate session is checked individually, so one
+    // session rebuilding never takes down the other projects' history lanes. The
+    // calling thread re-checks its own epochs after the await and drops whatever
+    // invalidated itself.
+    const projectSessionIds = request.projectSessionIds;
+    const eligibleProjectSessions = projectSessionIds?.filter((sessionId) =>
+        isMessageIndexSearchable(sessionId),
+    );
+    if (projectSessionIds && (eligibleProjectSessions?.length ?? 0) === 0)
+        return { results: [], suppressedLiveMessageMatches: 0 };
+    if (!projectSessionIds && !isMessageIndexSearchable(request.sessionId))
         return { results: [], suppressedLiveMessageMatches: 0 };
     const diagnostics = request.collectDiagnostics ? createUnifiedSearchDiagnostics() : undefined;
     const capture = request.captureLimit
@@ -303,6 +340,7 @@ export function searchMessageHistory(
         diagnostics,
         dateRange: request.dateRange,
         capture,
+        projectSessionIds: eligibleProjectSessions ?? undefined,
     });
     return {
         results,
@@ -328,7 +366,34 @@ export interface MessageSearchResult {
     messageOrdinal: number;
     messageId: string;
     role: string;
+    /** Session that owns the hit. Always the searched session on the
+     *  single-session lane; the owning session on a project-wide search. */
+    sessionId: string;
+    /**
+     * Persisted message time (epoch ms) read from the rowid sidecar. Null when
+     * the sidecar has no time for the row — never fabricated.
+     */
+    messageTimeMs: number | null;
 }
+
+/**
+ * Optional explicit-fusion-only return channel of {@link unifiedSearch} (see
+ * `UnifiedSearchOptions.collectReservedCandidates`). Populated after the
+ * per-source candidates are fetched but before the global limit slice and
+ * reranking, so fusion callers keep hits the truncated primary result may have
+ * dropped. Only collected for explicit searches; auto-search never enables it.
+ */
+export interface ReservedSearchCandidates {
+    /** Up to 5 raw message-lane hits (pre-compartment-merge, epoch-checked). */
+    messages: MessageSearchResult[];
+    /** Up to 5 git-commit hits from the same search. */
+    gitCommits: GitCommitSearchResult[];
+    /** Up to 5 raw message-lane hits of the current session, as searched. */
+    currentSessionMessages: MessageSearchResult[];
+}
+
+/** How many hits each reserved lane contributes at most. */
+const RESERVED_CANDIDATE_LIMIT = 5;
 
 export interface CompartmentSearchResult {
     source: "compartment";
@@ -530,7 +595,7 @@ function getMessageSearchStatement(db: Database, sessionFirst: boolean): Prepare
     let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ? AND message_history_fts MATCH ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`,
+            `SELECT message_history_fts.message_ordinal AS messageOrdinal, message_history_fts.message_id AS messageId, message_history_fts.role AS role, message_history_fts.content AS content, map.message_time_ms AS messageTimeMs FROM message_history_fts LEFT JOIN message_fts_rowid_map AS map ON map.session_id = message_history_fts.session_id AND map.fts_rowid = message_history_fts.rowid WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ? AND message_history_fts MATCH ? ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC LIMIT ?`,
         );
         statements.set(db, stmt);
     }
@@ -555,7 +620,7 @@ function getMessageSearchStatementWithCutoff(
     let stmt = statements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ? AND message_history_fts MATCH ? AND CAST(message_ordinal AS INTEGER) <= ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?`,
+            `SELECT message_history_fts.message_ordinal AS messageOrdinal, message_history_fts.message_id AS messageId, message_history_fts.role AS role, message_history_fts.content AS content, map.message_time_ms AS messageTimeMs FROM message_history_fts LEFT JOIN message_fts_rowid_map AS map ON map.session_id = message_history_fts.session_id AND map.fts_rowid = message_history_fts.rowid WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ? AND message_history_fts MATCH ? AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ? ORDER BY bm25(message_history_fts), CAST(message_history_fts.message_ordinal AS INTEGER) ASC LIMIT ?`,
         );
         statements.set(db, stmt);
     }
@@ -579,7 +644,8 @@ function getMessageSearchStatementWithDateRange(
             `SELECT message_history_fts.message_ordinal AS messageOrdinal,
                     message_history_fts.message_id AS messageId,
                     message_history_fts.role AS role,
-                    message_history_fts.content AS content
+                    message_history_fts.content AS content,
+                    map.message_time_ms AS messageTimeMs
                FROM message_history_fts
                JOIN message_fts_rowid_map AS map
                  ON map.session_id = message_history_fts.session_id
@@ -613,14 +679,18 @@ function getMessageSearchDiagnosticStatement(
         stmt = db.prepare(`
             WITH matches AS MATERIALIZED (
                 SELECT
-                    message_ordinal AS messageOrdinal,
-                    message_id AS messageId,
-                    role,
-                    content,
-                    CAST(message_ordinal AS INTEGER) AS ordinalValue,
+                    message_history_fts.message_ordinal AS messageOrdinal,
+                    message_history_fts.message_id AS messageId,
+                    message_history_fts.role AS role,
+                    message_history_fts.content AS content,
+                    map.message_time_ms AS messageTimeMs,
+                    CAST(message_history_fts.message_ordinal AS INTEGER) AS ordinalValue,
                     bm25(message_history_fts) AS ftsRank
                 FROM message_history_fts
-                WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}session_id = ? AND message_history_fts MATCH ?
+                LEFT JOIN message_fts_rowid_map AS map
+                  ON map.session_id = message_history_fts.session_id
+                 AND map.fts_rowid = message_history_fts.rowid
+                WHERE ${sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ? AND message_history_fts MATCH ?
             ),
             eligible AS (
                 SELECT * FROM matches
@@ -638,12 +708,13 @@ function getMessageSearchDiagnosticStatement(
                 eligible.messageId,
                 eligible.role,
                 eligible.content,
+                eligible.messageTimeMs,
                 eligible.ftsRank,
                 summary.suppressedCount,
                 0 AS summaryOnly
             FROM eligible CROSS JOIN summary
             UNION ALL
-            SELECT NULL, NULL, NULL, NULL, NULL, summary.suppressedCount, 1
+            SELECT NULL, NULL, NULL, NULL, NULL, NULL, summary.suppressedCount, 1
             FROM summary
             WHERE NOT EXISTS (SELECT 1 FROM eligible)
             ORDER BY summaryOnly ASC, ftsRank ASC, messageOrdinal ASC
@@ -663,6 +734,7 @@ function getMessageSearchDiagnosticStatementWithDateRange(db: Database): Prepare
                     message_history_fts.message_id AS messageId,
                     message_history_fts.role AS role,
                     message_history_fts.content AS content,
+                    map.message_time_ms AS messageTimeMs,
                     CAST(message_history_fts.message_ordinal AS INTEGER) AS ordinalValue,
                     bm25(message_history_fts) AS ftsRank
                 FROM message_history_fts
@@ -689,12 +761,13 @@ function getMessageSearchDiagnosticStatementWithDateRange(db: Database): Prepare
                 eligible.messageId,
                 eligible.role,
                 eligible.content,
+                eligible.messageTimeMs,
                 eligible.ftsRank,
                 summary.suppressedCount,
                 0 AS summaryOnly
             FROM eligible CROSS JOIN summary
             UNION ALL
-            SELECT NULL, NULL, NULL, NULL, NULL, summary.suppressedCount, 1
+            SELECT NULL, NULL, NULL, NULL, NULL, NULL, summary.suppressedCount, 1
             FROM summary
             WHERE NOT EXISTS (SELECT 1 FROM eligible)
             ORDER BY summaryOnly ASC, ftsRank ASC, messageOrdinal ASC
@@ -1168,12 +1241,17 @@ interface NormalizedMessageRow {
     messageId: string;
     role: string;
     content: string;
+    sessionId: string;
+    messageTimeMs: number | null;
 }
 
-/** Convert one FTS row into the validated shape consumed by message ranking. */
+/** Convert one FTS row into the validated shape consumed by message ranking.
+ *  The ordinal cutoff applies to the current session only — project-wide rows
+ *  from other sessions are never cut by the caller's compartment boundary. */
 function normalizeMessageSearchRow(
     row: MessageSearchRow,
     cutoff: number | null,
+    currentSessionId: string,
 ): NormalizedMessageRow | null {
     const messageOrdinal = getMessageOrdinal(row.messageOrdinal);
     if (
@@ -1184,13 +1262,20 @@ function normalizeMessageSearchRow(
     ) {
         return null;
     }
+    const sessionId = typeof row.sessionId === "string" ? row.sessionId : currentSessionId;
+    const messageTimeMs =
+        typeof row.messageTimeMs === "number" && Number.isFinite(row.messageTimeMs)
+            ? row.messageTimeMs
+            : null;
     // Defense-in-depth: every SQL path applies the cutoff before LIMIT.
-    if (cutoff !== null && messageOrdinal > cutoff) return null;
+    if (sessionId === currentSessionId && cutoff !== null && messageOrdinal > cutoff) return null;
     return {
         messageOrdinal,
         messageId: row.messageId,
         role: row.role,
         content: row.content,
+        sessionId,
+        messageTimeMs,
     };
 }
 
@@ -1239,7 +1324,7 @@ function runMessageFtsQuery(
 
     const result: NormalizedMessageRow[] = [];
     for (const row of rows) {
-        const normalized = normalizeMessageSearchRow(row, cutoff);
+        const normalized = normalizeMessageSearchRow(row, cutoff, sessionId);
         if (normalized) result.push(normalized);
     }
     return result;
@@ -1280,7 +1365,7 @@ function runMessageFtsQueryWithDiagnostics(args: {
     const rows: NormalizedMessageRow[] = [];
     for (const row of rawRows) {
         if (row.summaryOnly === 1) continue;
-        const normalized = normalizeMessageSearchRow(row, args.cutoff);
+        const normalized = normalizeMessageSearchRow(row, args.cutoff, args.sessionId);
         if (normalized) rows.push(normalized);
     }
     return { rows, suppressedCount };
@@ -1303,12 +1388,6 @@ function getBatchedMessageSearchStatement(
     if (!statement) {
         const cutoffSql =
             cutoff === null ? "" : " AND CAST(message_history_fts.message_ordinal AS INTEGER) <= ?";
-        const joinSql =
-            dateRange === null
-                ? ""
-                : ` JOIN message_fts_rowid_map AS map
-                         ON map.session_id = message_history_fts.session_id
-                        AND map.fts_rowid = message_history_fts.rowid`;
         const dateSql = dateRange === null ? "" : " AND map.message_time_ms BETWEEN ? AND ?";
         const branches = Array.from(
             { length: queryCount },
@@ -1318,8 +1397,12 @@ function getBatchedMessageSearchStatement(
                        message_history_fts.message_id AS messageId,
                        message_history_fts.role AS role,
                        message_history_fts.content AS content,
+                       map.message_time_ms AS messageTimeMs,
                        bm25(message_history_fts) AS ftsRank
-                  FROM message_history_fts${joinSql}
+                  FROM message_history_fts
+                  LEFT JOIN message_fts_rowid_map AS map
+                    ON map.session_id = message_history_fts.session_id
+                   AND map.fts_rowid = message_history_fts.rowid
                  WHERE ${sessionFirst || dateRange !== null ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ?
                     AND message_history_fts MATCH ?${dateSql}${cutoffSql}
                  ORDER BY ftsRank
@@ -1369,10 +1452,300 @@ function runMessageFtsQueriesBatch(
         ) {
             continue;
         }
-        const normalized = normalizeMessageSearchRow(row, cutoff);
+        const normalized = normalizeMessageSearchRow(row, cutoff, sessionId);
         if (normalized) result[row.queryIndex].push(normalized);
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Project-wide message FTS: ONE FTS MATCH over a SET of sessions (explicit
+// ctx_search only). Extends the single-session sidecar pattern: the rowid
+// prefilter screens the whole session set at once, the ordinary session
+// predicate (`session_id IN (...)`) stays as the integrity guard, and any
+// candidate with incomplete map coverage falls back to the global MATCH +
+// session filter — all proven inside one read transaction by
+// withMessageFtsSessionSetFilter, exactly like the single-session lane.
+
+function sessionSetPlaceholders(sessionCount: number): string {
+    return Array.from({ length: sessionCount }, () => "?").join(", ");
+}
+
+interface ProjectWideQueryShape {
+    cutoff: number | null;
+    dateRange: InclusiveDateRange | null;
+    /** Every candidate fully mapped → screen rowids through the sidecar. */
+    sessionSetFirst: boolean;
+}
+
+function projectWideWhereClause(sessionCount: number, shape: ProjectWideQueryShape): string {
+    const predicates: string[] = [];
+    if (shape.sessionSetFirst) {
+        predicates.push(`+message_history_fts.rowid IN (
+        SELECT fts_rowid FROM message_fts_rowid_map
+         WHERE session_id IN (${sessionSetPlaceholders(sessionCount)})
+    )`);
+    }
+    predicates.push(
+        `message_history_fts.session_id IN (${sessionSetPlaceholders(sessionCount)})`,
+        "message_history_fts MATCH ?",
+    );
+    if (shape.dateRange !== null) predicates.push("map.message_time_ms BETWEEN ? AND ?");
+    if (shape.cutoff !== null) {
+        // The compartment cutoff belongs to the current session only; every
+        // other project session is searched without a cutoff.
+        predicates.push(
+            "(message_history_fts.session_id <> ? OR CAST(message_history_fts.message_ordinal AS INTEGER) <= ?)",
+        );
+    }
+    return predicates.join("\n   AND ");
+}
+
+/** Bindings in exactly the order {@link projectWideWhereClause} consumes
+ *  them — the session list appears twice when the rowid prefilter is on —
+ *  followed by the caller's per-statement tail (e.g. LIMIT). */
+function projectWideBindings(args: {
+    sessionIds: readonly string[];
+    currentSessionId: string;
+    matchQuery: string;
+    shape: ProjectWideQueryShape;
+    tail: unknown[];
+}): unknown[] {
+    const { sessionIds, currentSessionId, matchQuery, shape } = args;
+    const bindings: unknown[] = [];
+    if (shape.sessionSetFirst) bindings.push(...sessionIds);
+    bindings.push(...sessionIds, matchQuery);
+    if (shape.dateRange !== null) bindings.push(shape.dateRange.from, shape.dateRange.to);
+    if (shape.cutoff !== null) bindings.push(currentSessionId, shape.cutoff);
+    bindings.push(...args.tail);
+    return bindings;
+}
+
+const PROJECT_WIDE_MESSAGE_MAP_JOIN = `LEFT JOIN message_fts_rowid_map AS map
+             ON map.session_id = message_history_fts.session_id
+            AND map.fts_rowid = message_history_fts.rowid`;
+
+function projectWideStatementKey(prefix: string, sessionCount: number, shape: ProjectWideQueryShape): string {
+    return `${prefix}:${sessionCount}:${shape.cutoff === null ? "all" : "cutoff"}:${
+        shape.dateRange === null ? "all-dates" : "dated"
+    }:${shape.sessionSetFirst}`;
+}
+
+function getProjectWideBatchedMessageSearchStatement(
+    db: Database,
+    sessionCount: number,
+    queryCount: number,
+    shape: ProjectWideQueryShape,
+): PreparedStatement {
+    let statements = projectWideBatchedMessageSearchStatements.get(db);
+    if (!statements) {
+        statements = new Map();
+        projectWideBatchedMessageSearchStatements.set(db, statements);
+    }
+    const key = projectWideStatementKey(`${queryCount}`, sessionCount, shape);
+    let statement = statements.get(key);
+    if (!statement) {
+        const branches = Array.from(
+            { length: queryCount },
+            (_, index) => `SELECT * FROM (
+                SELECT ${index} AS queryIndex,
+                       message_history_fts.message_ordinal AS messageOrdinal,
+                       message_history_fts.message_id AS messageId,
+                       message_history_fts.role AS role,
+                       message_history_fts.content AS content,
+                       message_history_fts.session_id AS sessionId,
+                       map.message_time_ms AS messageTimeMs,
+                       bm25(message_history_fts) AS ftsRank
+                  FROM message_history_fts
+                  LEFT JOIN message_fts_rowid_map AS map
+                    ON map.session_id = message_history_fts.session_id
+                   AND map.fts_rowid = message_history_fts.rowid
+                 WHERE ${projectWideWhereClause(sessionCount, shape)}
+                 ORDER BY ftsRank
+                 LIMIT ?
+            )`,
+        );
+        statement = db.prepare(
+            `${branches.join("\nUNION ALL\n")}\nORDER BY queryIndex ASC, ftsRank ASC`,
+        );
+        statements.set(key, statement);
+    }
+    return statement;
+}
+
+/** Run all base/probe result queries of a project-wide search as one compound
+ *  SQLite statement — the set analogue of {@link runMessageFtsQueriesBatch}. */
+function runProjectWideMessageFtsQueriesBatch(
+    db: Database,
+    sessionIds: readonly string[],
+    currentSessionId: string,
+    ftsQueries: readonly string[],
+    fetchLimit: number,
+    cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
+    sessionSetFirst: boolean,
+): NormalizedMessageRow[][] {
+    if (ftsQueries.length === 0 || sessionIds.length === 0) return [];
+    const shape: ProjectWideQueryShape = { cutoff, dateRange, sessionSetFirst };
+    const bindings: unknown[] = [];
+    for (const query of ftsQueries) {
+        bindings.push(
+            ...projectWideBindings({
+                sessionIds,
+                currentSessionId,
+                matchQuery: contentOnlyMessageQuery(query),
+                shape,
+                tail: [fetchLimit],
+            }),
+        );
+    }
+    const rows = getProjectWideBatchedMessageSearchStatement(
+        db,
+        sessionIds.length,
+        ftsQueries.length,
+        shape,
+    ).all(...bindings) as BatchedMessageSearchRow[];
+    const result = Array.from({ length: ftsQueries.length }, () => [] as NormalizedMessageRow[]);
+    for (const row of rows) {
+        if (
+            typeof row.queryIndex !== "number" ||
+            row.queryIndex < 0 ||
+            row.queryIndex >= result.length
+        ) {
+            continue;
+        }
+        const normalized = normalizeMessageSearchRow(row, cutoff, currentSessionId);
+        if (normalized) result[row.queryIndex].push(normalized);
+    }
+    return result;
+}
+
+function getProjectWideBatchedFtsCountStatement(
+    db: Database,
+    sessionCount: number,
+    queryCount: number,
+    cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
+): PreparedStatement {
+    let statements = projectWideBatchedFtsCountStatements.get(db);
+    if (!statements) {
+        statements = new Map();
+        projectWideBatchedFtsCountStatements.set(db, statements);
+    }
+    const key = `${queryCount}:${sessionCount}:${cutoff === null ? "all" : "cutoff"}:${
+        dateRange === null ? "all-dates" : "dated"
+    }`;
+    let statement = statements.get(key);
+    if (!statement) {
+        const shape: ProjectWideQueryShape = { cutoff, dateRange, sessionSetFirst: false };
+        statement = db.prepare(
+            Array.from(
+                { length: queryCount },
+                (_, index) => `SELECT ${index} AS queryIndex, COUNT(*) AS count
+                   FROM message_history_fts
+                   LEFT JOIN message_fts_rowid_map AS map
+                     ON map.session_id = message_history_fts.session_id
+                    AND map.fts_rowid = message_history_fts.rowid
+                  WHERE ${projectWideWhereClause(sessionCount, shape)}`,
+            ).join("\nUNION ALL\n"),
+        );
+        statements.set(key, statement);
+    }
+    return statement;
+}
+
+/** Set analogue of {@link countSessionFtsMatchesBatch}: per-probe document
+ *  frequencies across the whole candidate set in one statement. */
+function countProjectWideFtsMatchesBatch(
+    db: Database,
+    sessionIds: readonly string[],
+    currentSessionId: string,
+    ftsQueries: readonly string[],
+    cutoff: number | null,
+    dateRange: InclusiveDateRange | null,
+): number[] {
+    if (ftsQueries.length === 0) return [];
+    const bindings: unknown[] = [];
+    for (const query of ftsQueries) {
+        bindings.push(
+            ...projectWideBindings({
+                sessionIds,
+                currentSessionId,
+                matchQuery: contentOnlyMessageQuery(query),
+                shape: { cutoff, dateRange, sessionSetFirst: false },
+                tail: [],
+            }),
+        );
+    }
+    try {
+        const rows = getProjectWideBatchedFtsCountStatement(
+            db,
+            sessionIds.length,
+            ftsQueries.length,
+            cutoff,
+            dateRange,
+        ).all(...bindings) as BatchedFtsCountRow[];
+        const counts = Array.from({ length: ftsQueries.length }, () => 0);
+        for (const row of rows) {
+            if (
+                typeof row.queryIndex === "number" &&
+                row.queryIndex >= 0 &&
+                row.queryIndex < counts.length &&
+                typeof row.count === "number"
+            ) {
+                counts[row.queryIndex] = row.count;
+            }
+        }
+        return counts;
+    } catch {
+        // Malformed FTS syntax that survived sanitization is non-discriminative.
+        return Array.from({ length: ftsQueries.length }, () => 0);
+    }
+}
+
+/** Whole-table row count: the IDF-lite denominator for a project-wide probe.
+ *  bm25 statistics are whole-table (they always were); mixing the current
+ *  session's watermark here would skew cross-session probe weights, so the
+ *  multi-session lane deliberately uses the full corpus. */
+function getWholeTableMessageCorpusSize(db: Database): number {
+    let statement = wholeTableMessageCountStatements.get(db);
+    if (!statement) {
+        statement = db.prepare("SELECT COUNT(*) AS count FROM message_history_fts");
+        wholeTableMessageCountStatements.set(db, statement);
+    }
+    const row = statement.get() as { count?: number } | undefined;
+    return typeof row?.count === "number" ? row.count : 0;
+}
+
+/** Suppressed live-tail count for a project-wide diagnostic search: matching
+ *  rows of the CURRENT session above its compartment cutoff. Other project
+ *  sessions are never capped, so they never contribute to the suppression. */
+function countProjectWideSuppressedLiveMessages(args: {
+    db: Database;
+    currentSessionId: string;
+    ftsQuery: string;
+    cutoff: number;
+    dateRange: InclusiveDateRange | null;
+}): number {
+    if (args.ftsQuery.length === 0) return 0;
+    const dateJoin = args.dateRange === null ? "" : PROJECT_WIDE_MESSAGE_MAP_JOIN;
+    const datePredicate = args.dateRange === null ? "" : " AND map.message_time_ms BETWEEN ? AND ?";
+    const row = args.db
+        .prepare(
+            `SELECT COUNT(*) AS count
+               FROM message_history_fts
+               ${dateJoin}
+              WHERE message_history_fts.session_id = ?
+                AND message_history_fts MATCH ?
+                AND CAST(message_history_fts.message_ordinal AS INTEGER) > ?${datePredicate}`,
+        )
+        .get(
+            args.currentSessionId,
+            contentOnlyMessageQuery(args.ftsQuery),
+            args.cutoff,
+            ...(args.dateRange === null ? [] : [args.dateRange.from, args.dateRange.to]),
+        ) as { count?: number } | undefined;
+    return typeof row?.count === "number" ? row.count : 0;
 }
 
 // Reciprocal-rank-fusion constant. 60 is the canonical RRF k; it dampens the
@@ -1400,6 +1773,22 @@ function probeDiscriminationWeight(df: number, corpusSize: number): number {
     return 1 / (1 + (IDF_FALLOFF * df) / corpusSize);
 }
 
+/** Stable cross-session tie-break: persisted time first (unknown times last),
+ *  then owning session, then ordinal. Ordinals are per-session sequence
+ *  numbers, so they are never interpreted as a global timeline. */
+function compareMessageIdentity(
+    left: { messageTimeMs: number | null; sessionId: string; messageOrdinal: number },
+    right: { messageTimeMs: number | null; sessionId: string; messageOrdinal: number },
+): number {
+    // Never subtract two absent times (Infinity - Infinity = NaN poisons the
+    // comparator and leaves Array.sort order undefined).
+    const leftTime = left.messageTimeMs ?? Number.POSITIVE_INFINITY;
+    const rightTime = right.messageTimeMs ?? Number.POSITIVE_INFINITY;
+    if (leftTime !== rightTime) return leftTime - rightTime;
+    if (left.sessionId !== right.sessionId) return left.sessionId < right.sessionId ? -1 : 1;
+    return left.messageOrdinal - right.messageOrdinal;
+}
+
 function searchMessages(args: {
     db: Database;
     sessionId: string;
@@ -1408,13 +1797,33 @@ function searchMessages(args: {
     /** Only return messages with ordinal ≤ this value. Omit or -1 to search all indexed messages. */
     maxOrdinal?: number;
     /** Literal probes to additionally query (multi-probe recall). Empty = the
-     * original single-query behavior (unchanged for NL queries / hot path). */
+     *  original single-query behavior (unchanged for NL queries / hot path). */
     probes?: string[];
     relaxedRecall?: boolean;
     diagnostics?: UnifiedSearchDiagnostics;
     dateRange: InclusiveDateRange | null;
     capture?: { limit: number; results: MessageSearchResult[] };
+    /** Project-wide explicit search: the eligible session set (including
+     *  `sessionId`). Omit for the single-session lane. Bounded to
+     *  MAX_PROJECT_WIDE_SEARCH_SESSIONS so the bind-parameter count stays
+     *  under SQLITE_MAX_VARIABLE_NUMBER no matter how many sessions a caller
+     *  lists. */
+    projectSessionIds?: string[];
 }): MessageSearchResult[] {
+    const cappedProjectSessionIds =
+        args.projectSessionIds !== undefined && args.projectSessionIds.length > 0
+            ? args.projectSessionIds.length > MAX_PROJECT_WIDE_SEARCH_SESSIONS
+                ? args.projectSessionIds.slice(0, MAX_PROJECT_WIDE_SEARCH_SESSIONS)
+                : args.projectSessionIds
+            : undefined;
+    if (cappedProjectSessionIds !== undefined) {
+        return withMessageFtsSessionSetFilter(args.db, cappedProjectSessionIds, (sessionSetFirst) =>
+            searchMessagesInSnapshot(
+                { ...args, projectSessionIds: [...cappedProjectSessionIds] },
+                sessionSetFirst,
+            ),
+        );
+    }
     return withMessageFtsSessionFilter(args.db, args.sessionId, (sessionFirst) =>
         searchMessagesInSnapshot(args, sessionFirst),
     );
@@ -1435,33 +1844,85 @@ function searchMessagesInSnapshot(
 
     const baseQuery = sanitizeFtsQuery(args.query.trim());
     const probes = args.probes ?? [];
+    const projectSessionIds =
+        args.projectSessionIds !== undefined && args.projectSessionIds.length > 0
+            ? args.projectSessionIds
+            : null;
+
+    // One query runner pair for both lane shapes: the project-wide lane issues
+    // exactly one MATCH per query over the whole session set (never one query
+    // per session) through the same batched statement family the probe lane
+    // uses; the single-session lane keeps its original statements.
+    const runQuery = (ftsQuery: string, limit: number): NormalizedMessageRow[] =>
+        ftsQuery.length === 0
+            ? []
+            : projectSessionIds !== null
+              ? (runProjectWideMessageFtsQueriesBatch(
+                    args.db,
+                    projectSessionIds,
+                    args.sessionId,
+                    [ftsQuery],
+                    limit,
+                    cutoff,
+                    args.dateRange,
+                    sessionFirst,
+                )[0] ?? [])
+              : runMessageFtsQuery(
+                    args.db,
+                    args.sessionId,
+                    ftsQuery,
+                    limit,
+                    cutoff,
+                    args.dateRange,
+                    sessionFirst,
+                );
+    const runQueryWithDiagnostics = (
+        ftsQuery: string,
+        limit: number,
+        queryCutoff: number,
+    ): { rows: NormalizedMessageRow[]; suppressedCount: number } => {
+        if (projectSessionIds !== null) {
+            if (ftsQuery.length === 0) return { rows: [], suppressedCount: 0 };
+            const rows =
+                runProjectWideMessageFtsQueriesBatch(
+                    args.db,
+                    projectSessionIds,
+                    args.sessionId,
+                    [ftsQuery],
+                    limit,
+                    queryCutoff,
+                    args.dateRange,
+                    sessionFirst,
+                )[0] ?? [];
+            return {
+                rows,
+                suppressedCount: countProjectWideSuppressedLiveMessages({
+                    db: args.db,
+                    currentSessionId: args.sessionId,
+                    ftsQuery,
+                    cutoff: queryCutoff,
+                    dateRange: args.dateRange,
+                }),
+            };
+        }
+        return runMessageFtsQueryWithDiagnostics({
+            db: args.db,
+            sessionId: args.sessionId,
+            ftsQuery,
+            fetchLimit: limit,
+            cutoff: queryCutoff,
+            dateRange: args.dateRange,
+            sessionFirst,
+        });
+    };
 
     // No probes → original single-query path, byte-identical scoring. This is
     // the hot path (auto-search) and every plain natural-language query.
     if (probes.length === 0) {
         const outcome =
             args.diagnostics && cutoff !== null
-                ? runMessageFtsQueryWithDiagnostics({
-                      db: args.db,
-                      sessionId: args.sessionId,
-                      ftsQuery: baseQuery,
-                      fetchLimit,
-                      cutoff,
-                      dateRange: args.dateRange,
-                      sessionFirst,
-                  })
-                : {
-                      rows: runMessageFtsQuery(
-                          args.db,
-                          args.sessionId,
-                          baseQuery,
-                          fetchLimit,
-                          cutoff,
-                          args.dateRange,
-                          sessionFirst,
-                      ),
-                      suppressedCount: 0,
-                  };
+                ? runQueryWithDiagnostics(baseQuery, fetchLimit, cutoff)
+                : { rows: runQuery(baseQuery, fetchLimit), suppressedCount: 0 };
         if (args.diagnostics) {
             args.diagnostics.suppressedLiveMessageMatches = outcome.suppressedCount;
         }
@@ -1470,15 +1931,7 @@ function searchMessagesInSnapshot(
         const rows =
             outcome.rows.length > 0 || !args.relaxedRecall
                 ? outcome.rows
-                : runMessageFtsQuery(
-                      args.db,
-                      args.sessionId,
-                      relaxedFtsQuery(args.query),
-                      fetchLimit,
-                      cutoff,
-                      args.dateRange,
-                      sessionFirst,
-                  );
+                : runQuery(relaxedFtsQuery(args.query), fetchLimit);
         const renderRows = (limit: number) => {
             const filtered = rows.slice(0, limit);
             return filtered.map(
@@ -1490,6 +1943,8 @@ function searchMessagesInSnapshot(
                     messageOrdinal: row.messageOrdinal,
                     messageId: row.messageId,
                     role: row.role,
+                    sessionId: row.sessionId,
+                    messageTimeMs: row.messageTimeMs,
                 }),
             );
         };
@@ -1503,27 +1958,36 @@ function searchMessagesInSnapshot(
     const sanitizedProbes = probes
         .map((probe) => ({ probe, query: sanitizeFtsQuery(probe) }))
         .filter((entry) => entry.query.length > 0);
-    const corpusSize = getIndexedMessageCorpusSize(args.db, args.sessionId, cutoff);
-    const probeCounts = countSessionFtsMatchesBatch(
-        args.db,
-        args.sessionId,
-        sanitizedProbes.map((entry) => entry.query),
-        cutoff,
-        args.dateRange,
-        sessionFirst,
-    );
+    // Probe discrimination weights must pair the df numerator with a matching
+    // corpus: the single-session lane keeps its watermark approximation, while
+    // the project-wide lane uses the whole-table N (bm25 always was
+    // whole-table) so one session's size never skews another session's probes.
+    const corpusSize =
+        projectSessionIds !== null
+            ? getWholeTableMessageCorpusSize(args.db)
+            : getIndexedMessageCorpusSize(args.db, args.sessionId, cutoff);
+    const probeCounts =
+        projectSessionIds !== null
+            ? countProjectWideFtsMatchesBatch(
+                  args.db,
+                  projectSessionIds,
+                  args.sessionId,
+                  sanitizedProbes.map((entry) => entry.query),
+                  cutoff,
+                  args.dateRange,
+              )
+            : countSessionFtsMatchesBatch(
+                  args.db,
+                  args.sessionId,
+                  sanitizedProbes.map((entry) => entry.query),
+                  cutoff,
+                  args.dateRange,
+                  sessionFirst,
+              );
     const collectBaseDiagnostics = args.diagnostics !== undefined && cutoff !== null;
     const baseOutcome =
         collectBaseDiagnostics && baseQuery.length > 0
-            ? runMessageFtsQueryWithDiagnostics({
-                  db: args.db,
-                  sessionId: args.sessionId,
-                  ftsQuery: baseQuery,
-                  fetchLimit,
-                  cutoff,
-                  dateRange: args.dateRange,
-                  sessionFirst,
-              })
+            ? runQueryWithDiagnostics(baseQuery, fetchLimit, cutoff)
             : null;
     if (args.diagnostics) {
         args.diagnostics.suppressedLiveMessageMatches = baseOutcome?.suppressedCount ?? 0;
@@ -1532,15 +1996,27 @@ function searchMessagesInSnapshot(
         ...(!collectBaseDiagnostics && baseQuery.length > 0 ? [baseQuery] : []),
         ...sanitizedProbes.map((entry) => entry.query),
     ];
-    const rowsByQuery = runMessageFtsQueriesBatch(
-        args.db,
-        args.sessionId,
-        searchQueries,
-        fetchLimit,
-        cutoff,
-        args.dateRange,
-        sessionFirst,
-    );
+    const rowsByQuery =
+        projectSessionIds !== null
+            ? runProjectWideMessageFtsQueriesBatch(
+                  args.db,
+                  projectSessionIds,
+                  args.sessionId,
+                  searchQueries,
+                  fetchLimit,
+                  cutoff,
+                  args.dateRange,
+                  sessionFirst,
+              )
+            : runMessageFtsQueriesBatch(
+                  args.db,
+                  args.sessionId,
+                  searchQueries,
+                  fetchLimit,
+                  cutoff,
+                  args.dateRange,
+                  sessionFirst,
+              );
 
     const queryLists: Array<{ rows: NormalizedMessageRow[]; weight: number }> = [];
     let queryIndex = 0;
@@ -1565,11 +2041,14 @@ function searchMessagesInSnapshot(
         for (const list of queryLists) {
             list.rows.slice(0, rowLimit).forEach((row, rank) => {
                 const rrf = list.weight / (RRF_K + rank);
-                const existing = fused.get(row.messageId);
+                // Identity is owning session plus message id — neither is
+                // unique across sessions.
+                const key = `${row.sessionId} ${row.messageId}`;
+                const existing = fused.get(key);
                 if (existing) {
                     existing.score += rrf;
                 } else {
-                    fused.set(row.messageId, { row, score: rrf });
+                    fused.set(key, { row, score: rrf });
                 }
             });
         }
@@ -1592,9 +2071,7 @@ function searchMessagesInSnapshot(
 
         const ranked = [...fused.values()]
             .sort((a, b) =>
-                b.score !== a.score
-                    ? b.score - a.score
-                    : a.row.messageOrdinal - b.row.messageOrdinal,
+                b.score !== a.score ? b.score - a.score : compareMessageIdentity(a.row, b.row),
             )
             .slice(0, resultLimit);
 
@@ -1609,6 +2086,8 @@ function searchMessagesInSnapshot(
             messageOrdinal: entry.row.messageOrdinal,
             messageId: entry.row.messageId,
             role: entry.row.role,
+            sessionId: entry.row.sessionId,
+            messageTimeMs: entry.row.messageTimeMs,
         }));
     };
     if (args.capture) args.capture.results = rankProbeLists(captureFetchLimit, args.capture.limit);
@@ -1917,6 +2396,11 @@ async function searchCompartmentChunks(args: {
         }));
 }
 
+/** Fuse the message lane with the current session's compartment lane.
+ *  A message may only merge into a compartment of ITS OWN session: ordinals
+ *  are per-session sequence numbers, so an equal ordinal in another session
+ *  must never donate its text to — or be swallowed by — this session's
+ *  compartment. Compartment loading stays current-session-only. */
 function mergeMessageAndCompartmentResults(args: {
     messages: MessageSearchResult[];
     compartments: CompartmentSearchResult[];
@@ -1930,6 +2414,7 @@ function mergeMessageAndCompartmentResults(args: {
         {
             result: MessageSearchResult | CompartmentSearchResult;
             score: number;
+            tieSession: string;
             tieOrdinal: number;
             snippetScore: number;
         }
@@ -1939,6 +2424,7 @@ function mergeMessageAndCompartmentResults(args: {
         key: string,
         result: MessageSearchResult | CompartmentSearchResult,
         score: number,
+        tieSession: string,
         tieOrdinal: number,
     ) => {
         const existing = fused.get(key);
@@ -1946,7 +2432,7 @@ function mergeMessageAndCompartmentResults(args: {
             existing.score += score;
             return existing;
         }
-        const entry = { result, score, tieOrdinal, snippetScore: -1 };
+        const entry = { result, score, tieSession, tieOrdinal, snippetScore: -1 };
         fused.set(key, entry);
         return entry;
     };
@@ -1956,6 +2442,7 @@ function mergeMessageAndCompartmentResults(args: {
             `compartment:${compartment.compartmentId}`,
             compartment,
             1 / (RRF_K + rank),
+            compartment.sessionId,
             compartment.startOrdinal,
         );
     });
@@ -1963,12 +2450,19 @@ function mergeMessageAndCompartmentResults(args: {
     for (const [rank, message] of args.messages.entries()) {
         const containing = args.compartments.find(
             (compartment) =>
+                compartment.sessionId === message.sessionId &&
                 message.messageOrdinal >= compartment.startOrdinal &&
                 message.messageOrdinal <= compartment.endOrdinal,
         );
         const contribution = 1 / (RRF_K + rank);
         if (!containing) {
-            add(`message:${message.messageId}`, message, contribution, message.messageOrdinal);
+            add(
+                `message:${message.sessionId}:${message.messageId}`,
+                message,
+                contribution,
+                message.sessionId,
+                message.messageOrdinal,
+            );
             continue;
         }
 
@@ -1976,6 +2470,7 @@ function mergeMessageAndCompartmentResults(args: {
             `compartment:${containing.compartmentId}`,
             containing,
             contribution,
+            containing.sessionId,
             containing.startOrdinal,
         );
         if (message.score > entry.snippetScore && entry.result.source === "compartment") {
@@ -1992,7 +2487,11 @@ function mergeMessageAndCompartmentResults(args: {
         .sort((left, right) =>
             right.score !== left.score
                 ? right.score - left.score
-                : left.tieOrdinal - right.tieOrdinal,
+                : left.tieSession !== right.tieSession
+                  ? left.tieSession < right.tieSession
+                      ? -1
+                      : 1
+                  : left.tieOrdinal - right.tieOrdinal,
         )
         .slice(0, args.limit);
 
@@ -2030,7 +2529,7 @@ function compareUnifiedResults(left: UnifiedSearchResult, right: UnifiedSearchRe
     }
 
     if (left.source === "message" && right.source === "message") {
-        return left.messageOrdinal - right.messageOrdinal;
+        return compareMessageIdentity(left, right);
     }
 
     if (left.source === "compartment" && right.source === "compartment") {
@@ -2329,6 +2828,82 @@ export function resolveMemoriesByIdsForSearch(args: {
     });
 }
 
+/** SQLITE_MAX_VARIABLE_NUMBER is 999 by default. A session-set query binds the
+ *  list twice (rowid prefilter + integrity guard) plus a few scalars per
+ *  branch, so cap the candidate set far below half the budget. The list is
+ *  deterministically ordered (current session first, then sorted ids):
+ *  sessions beyond the cap are not searched this pass. */
+const MAX_PROJECT_WIDE_SEARCH_SESSIONS = 200;
+
+/** Candidate session set of a project-wide explicit search. The current
+ *  session is always eligible (its caller is the project); every OTHER session
+ *  qualifies only through an authoritative `session_projects` binding whose
+ *  stored path normalizes to the caller's project identity — never raw path
+ *  string equality. Sessions without a binding are excluded: an unmapped
+ *  session cannot be proven to belong to this project. A session whose
+ *  bindings normalize to more than one identity across harnesses is refused,
+ *  never guessed. */
+function resolveProjectWideCandidateSessions(
+    db: Database,
+    currentSessionId: string,
+    projectPath: string,
+): {
+    sessionIds: string[];
+    /** Per session, the moment its binding's project_path last changed (ms) —
+     *  the session-moved-projects contract shared with the storage/expand
+     *  side. A hit whose indexed message time predates it was indexed under
+     *  the session's previous project and is excluded from this lane. */
+    mappingUpdatedAtMs: Map<string, number>;
+} {
+    const callerIdentity = normalizeStoredProjectPath(projectPath);
+    const rows = db
+        .prepare(
+            "SELECT session_id AS sessionId, project_path AS projectPath, updated_at AS updatedAt FROM session_projects",
+        )
+        .all() as Array<{ sessionId: string; projectPath: string; updatedAt: number }>;
+    const bindingsBySession = new Map<
+        string,
+        Array<{ identity: string; updatedAt: number }>
+    >();
+    for (const row of rows) {
+        let bindings = bindingsBySession.get(row.sessionId);
+        if (!bindings) {
+            bindings = [];
+            bindingsBySession.set(row.sessionId, bindings);
+        }
+        bindings.push({
+            identity: normalizeStoredProjectPath(row.projectPath),
+            updatedAt: row.updatedAt,
+        });
+    }
+    const admittedUpdatedAt = (sessionId: string): number | null => {
+        const bindings = bindingsBySession.get(sessionId);
+        if (!bindings) return null;
+        const identities = new Set(bindings.map((binding) => binding.identity));
+        if (identities.size !== 1 || !identities.has(callerIdentity)) return null;
+        return Math.max(...bindings.map((binding) => binding.updatedAt));
+    };
+    const mappingUpdatedAtMs = new Map<string, number>();
+    const others: string[] = [];
+    for (const sessionId of bindingsBySession.keys()) {
+        if (sessionId === currentSessionId) continue;
+        const updatedAt = admittedUpdatedAt(sessionId);
+        if (updatedAt === null) continue;
+        mappingUpdatedAtMs.set(sessionId, updatedAt);
+        others.push(sessionId);
+    }
+    others.sort();
+    const currentUpdatedAt = admittedUpdatedAt(currentSessionId);
+    if (currentUpdatedAt !== null) mappingUpdatedAtMs.set(currentSessionId, currentUpdatedAt);
+    return {
+        sessionIds: [
+            currentSessionId,
+            ...others.slice(0, MAX_PROJECT_WIDE_SEARCH_SESSIONS - 1),
+        ],
+        mappingUpdatedAtMs,
+    };
+}
+
 export async function unifiedSearch(
     db: Database,
     sessionId: string,
@@ -2336,12 +2911,30 @@ export async function unifiedSearch(
     query: string,
     options: UnifiedSearchOptions = {},
 ): Promise<UnifiedSearchResult[]> {
-    const messageIndexEpoch = getMessageIndexEpoch(sessionId);
-    const messageIndexWasSearchable = isMessageIndexSearchable(sessionId);
-    const messageIndexStillCurrent = () =>
-        messageIndexWasSearchable &&
-        isMessageIndexSearchable(sessionId) &&
-        getMessageIndexEpoch(sessionId) === messageIndexEpoch;
+    // Per-candidate-session index snapshots: taken at issue time and re-checked
+    // after every await, so one session rebuilding drops only its own hits —
+    // never the whole message lane, and never another session's history.
+    const messageLaneSnapshots = new Map<string, { searchable: boolean; epoch: number }>();
+    const snapshotMessageLaneSession = (targetSessionId: string) => {
+        const snapshot = {
+            searchable: isMessageIndexSearchable(targetSessionId),
+            epoch: getMessageIndexEpoch(targetSessionId),
+        };
+        messageLaneSnapshots.set(targetSessionId, snapshot);
+        return snapshot;
+    };
+    const messageLaneSessionStillCurrent = (targetSessionId: string) => {
+        const snapshot = messageLaneSnapshots.get(targetSessionId);
+        // A session we never snapshotted carries no invalidation evidence — its
+        // hits stay (older delegates and mocked lanes may not tag sessions).
+        if (snapshot === undefined) return true;
+        return (
+            snapshot.searchable &&
+            isMessageIndexSearchable(targetSessionId) &&
+            getMessageIndexEpoch(targetSessionId) === snapshot.epoch
+        );
+    };
+    snapshotMessageLaneSession(sessionId);
     const trimmedQuery = query.trim();
     const measurementStartedAt = Date.now();
     if (trimmedQuery.length === 0 || options.signal?.aborted) {
@@ -2441,7 +3034,26 @@ export async function unifiedSearch(
     const timings = options.stepTimings;
     let stepStartedAt = performance.now();
     let messageResults: MessageSearchResult[] = [];
-    if (runMessages && messageIndexStillCurrent()) {
+    // Explicit ctx_search searches the whole project; auto-search and every
+    // other caller keep the single-session lane. When no other session is
+    // provably bound to this project, the lane is exactly the current session
+    // and runs its original single-session path unchanged.
+    const projectWideResolution =
+        options.explicitSearch && runMessages
+            ? resolveProjectWideCandidateSessions(db, sessionId, projectPath)
+            : null;
+    const projectWideSessionIds = projectWideResolution?.sessionIds ?? null;
+    const mappingUpdatedAtMs = projectWideResolution?.mappingUpdatedAtMs ?? new Map<string, number>();
+    const projectWide =
+        projectWideSessionIds !== null && projectWideSessionIds.length > 1;
+    const messageLaneSessions = projectWideSessionIds ?? [sessionId];
+    // Issue-time check, per candidate: an unsearchable session is dropped from
+    // the request, not from the whole lane — if the current session is
+    // rebuilding, the other project sessions still return.
+    const eligibleMessageLaneSessions = messageLaneSessions.filter(
+        (candidateSessionId) => snapshotMessageLaneSession(candidateSessionId).searchable,
+    );
+    if (runMessages && eligibleMessageLaneSessions.length > 0) {
         const messageRequest: MessageHistorySearchRequest = {
             sessionId,
             query: trimmedQuery,
@@ -2452,6 +3064,7 @@ export async function unifiedSearch(
             relaxedRecall: options.explicitSearch,
             collectDiagnostics: options.diagnostics !== undefined,
             dateRange,
+            projectSessionIds: projectWide ? eligibleMessageLaneSessions : undefined,
         };
         // Explicit searches with literal probes count every probe's matches
         // across the session; a caller can move that work off its thread.
@@ -2468,9 +3081,24 @@ export async function unifiedSearch(
         if (options.diagnostics) {
             options.diagnostics.suppressedLiveMessageMatches = outcome.suppressedLiveMessageMatches;
         }
-        messageResults = outcome.results.filter(
-            (result) => result.messageId !== options.excludeMessageId,
-        );
+        // The exclusion is scoped to the current session: the same message id
+        // in another project session is a different message and must survive.
+        // Session-moved-projects rule (shared contract with the storage/expand
+        // side, which maintains `updated_at` as the moment a binding's path
+        // actually changed): a hit indexed BEFORE its session's binding change
+        // belongs to the session's previous project and stays out of this
+        // lane. shortcut: legacy rows without index time are attributed to the
+        // session's current project; upgrade when per-message provenance
+        // exists.
+        const attributedToThisProject = (result: MessageSearchResult): boolean =>
+            result.messageTimeMs === null ||
+            result.messageTimeMs >= (mappingUpdatedAtMs.get(result.sessionId) ?? 0);
+        messageResults = outcome.results
+            .filter(
+                (result) =>
+                    result.sessionId !== sessionId || result.messageId !== options.excludeMessageId,
+            )
+            .filter(attributedToThisProject);
         if (lanes) lanes.message_fts = (outcome.laneResults ?? outcome.results).slice(0, 25);
         if (timings) timings.messageMs = performance.now() - stepStartedAt;
         recordAutoSearchLane(
@@ -2624,6 +3252,26 @@ export async function unifiedSearch(
     if (options.diagnostics) {
         options.diagnostics.suppressedVisibleMemoryIds = memoryOutcome.suppressedVisibleIds;
     }
+    // Explicit-fusion-only reserved channel: report raw pre-merge,
+    // epoch-checked candidates BEFORE the global limit slice and rerank can
+    // drop them. Never collected for auto-search or plain explicit search.
+    let reservedCandidates: ReservedSearchCandidates | null = null;
+    if (options.explicitSearch && options.collectReservedCandidates) {
+        const stillCurrent = (result: MessageSearchResult) =>
+            messageLaneSessionStillCurrent(result.sessionId);
+        reservedCandidates = {
+            messages: messageResults.filter(stillCurrent).slice(0, RESERVED_CANDIDATE_LIMIT),
+            gitCommits: gitCommitResults.slice(0, RESERVED_CANDIDATE_LIMIT),
+            currentSessionMessages: messageResults
+                .filter((result) => result.sessionId === sessionId)
+                .filter(stillCurrent)
+                .slice(0, RESERVED_CANDIDATE_LIMIT),
+        };
+        options.collectReservedCandidates(reservedCandidates);
+    }
+    // Re-validate message hits BEFORE ranking/truncation: a session invalidated
+    // mid-search must not consume a result slot that a valid other-session hit
+    // could have filled — filtering after the limit slice cannot backfill.
     let results = [
         ...memoryOutcome.results,
         ...primerResults,
@@ -2631,6 +3279,10 @@ export async function unifiedSearch(
         ...gitCommitResults,
         ...noteResults,
     ]
+        .filter(
+            (result) =>
+                result.source !== "message" || messageLaneSessionStillCurrent(result.sessionId),
+        )
         .sort(compareUnifiedResults)
         .slice(0, limit);
 
@@ -2663,13 +3315,28 @@ export async function unifiedSearch(
         }
     }
 
+    // The rerank await can outlive a session's validity, and a reranked pool
+    // can surface lane message hits the pre-truncation pass never ranked: drop
+    // exactly the invalidated sessions' hits before anything ships. Same
+    // per-session fail-open rule as the pre-truncation pass and the reserved
+    // channel.
+    results = results.filter(
+        (result) =>
+            result.source !== "message" || messageLaneSessionStillCurrent(result.sessionId),
+    );
+
     if (!options.measurementDisabled) {
         void recordShadowMeasurement({
             db,
             sessionId,
             projectPath,
             query: trimmedQuery,
-            options: { ...options, rerank: false, captureRerankLanes: undefined },
+            options: {
+                ...options,
+                rerank: false,
+                captureRerankLanes: undefined,
+                collectReservedCandidates: undefined,
+            },
             primaryResults: originalResults,
             primaryQuery: queryContract,
             primaryLatencyMs: originalLatencyMs,
@@ -2703,10 +3370,19 @@ export async function unifiedSearch(
         }
     }
 
-    // Worker, embedding and reranking awaits can outlive a tree navigation.
-    // Only raw-message hits depend on this index; retain every other lane.
-    if (!messageIndexStillCurrent())
-        results = results.filter((result) => result.source !== "message");
+    // Re-validate the reserved channel at return: the rerank/model awaits can
+    // invalidate a session AFTER the pre-truncation snapshot handed hits to the
+    // caller. The candidates object is shared by reference, so replacing its
+    // arrays updates what the caller reads once this promise resolves. Same
+    // per-session fail-open rule as the main lane: unsnapshotted sessions keep
+    // their candidates.
+    if (reservedCandidates) {
+        const stillCurrent = (result: MessageSearchResult) =>
+            messageLaneSessionStillCurrent(result.sessionId);
+        reservedCandidates.messages = reservedCandidates.messages.filter(stillCurrent);
+        reservedCandidates.currentSessionMessages =
+            reservedCandidates.currentSessionMessages.filter(stillCurrent);
+    }
 
     if (options.autoHint) {
         return results.map((result) => ({
@@ -2776,8 +3452,13 @@ function formatUnifiedSearchResult(
     }
     const expandStart = Math.max(1, result.messageOrdinal - 3);
     const expandEnd = result.messageOrdinal + 3;
+    // A hit from another project session carries its full identity; the
+    // persisted time renders only when the index actually knows it (never
+    // fabricated from the ordinal).
+    const foreignSession = result.sessionId !== currentSessionId ? ` session=${result.sessionId}` : "";
+    const age = result.messageTimeMs !== null ? ` ${formatSearchAge(result.messageTimeMs)}` : "";
     return [
-        `[${index}] [message] score=${result.score.toFixed(2)} ordinal=${result.messageOrdinal} range=${expandStart}-${expandEnd} role=${result.role}`,
+        `[${index}] [message] score=${result.score.toFixed(2)}${foreignSession}${age} ordinal=${result.messageOrdinal} range=${expandStart}-${expandEnd} role=${result.role}`,
         result.content,
     ].join("\n");
 }
@@ -2841,6 +3522,26 @@ export function formatSearchResults(
     if (results.some((result) => result.source === "message" || result.source === "compartment")) {
         bodyParts.push(
             "Use ctx_expand(start, end) with the range from any message result above to read the conversation context. If the host no longer holds those messages, ctx_expand returns indexed text from the search archive only, with no surrounding messages or tool output.",
+        );
+    }
+    // Hits owned by another session expand against THEIR session, not the
+    // caller's: a bare `ctx_expand(start, end)` would read the current
+    // session's ordinals. Point those at the owning session explicitly.
+    const foreignSessions = [
+        ...new Set(
+            results.flatMap((result) =>
+                (result.source === "message" || result.source === "compartment") &&
+                result.sessionId !== currentSessionId
+                    ? [result.sessionId]
+                    : [],
+            ),
+        ),
+    ].sort();
+    if (foreignSessions.length > 0) {
+        bodyParts.push(
+            `Message results from another session expand against their OWN session: ${foreignSessions
+                .map((id) => `ctx_expand(sessionId: "${id}", message: <ordinal>)`)
+                .join("; ")}.`,
         );
     }
     if (

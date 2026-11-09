@@ -30,6 +30,14 @@ export function hasMisScopedCompartmentChunkEmbeddingsForProject(
     return !!stmt.get(projectPath, projectPath);
 }
 
+/**
+ * The conflict arm bumps `updated_at` ONLY when the observed project path
+ * actually differs: `updated_at` is "when this session last changed project",
+ * not "last observed". A no-op re-observation (same session, same project,
+ * steady state) leaves the row — including its original `updated_at` —
+ * untouched. The cross-session expand ownership gate relies on this to tell
+ * rows indexed before a session's project move apart from current ones.
+ */
 function getUpsertSessionProjectStatement(db: Database): PreparedStatement {
     let stmt = upsertSessionProjectStatements.get(db);
     if (!stmt) {

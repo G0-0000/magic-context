@@ -22,6 +22,7 @@ import {
     getArchiveReadsOnThisThreadForTest,
     renderSearchArchive,
     renderSearchArchiveOffThread,
+    renderSearchArchiveWithStatus,
 } from "./search-archive";
 import { createCtxExpandTools } from "./tools";
 
@@ -80,7 +81,7 @@ it("worker archive is byte-identical for mapped and legacy rows in every ctx_exp
                 }
                 for (const budget of [1, 20, 6000]) {
                     for (const archiveOnly of [false, true]) {
-                        const expected = renderSearchArchive(
+                        const expected = renderSearchArchiveWithStatus(
                             db,
                             SESSION,
                             1,
@@ -89,19 +90,23 @@ it("worker archive is byte-identical for mapped and legacy rows in every ctx_exp
                             archiveOnly,
                             () => readRawSessionMessageIdOrdinalsForRangeFromDb(raw, SESSION, 1, 6),
                         );
-                        expect(
-                            await renderSearchArchiveOffThread(
-                                db,
-                                SESSION,
-                                1,
-                                6,
-                                budget,
-                                archiveOnly,
-                            ),
-                        ).toBe(expected);
+                        const offThread = await renderSearchArchiveOffThread(
+                            db,
+                            SESSION,
+                            1,
+                            6,
+                            budget,
+                            archiveOnly,
+                        );
+                        // The worker reply carries the renderer's own truncation
+                        // decision, byte-identical to the synchronous render's.
+                        expect(offThread.text).toBe(expected?.text ?? null);
+                        expect(offThread.truncated).toBe(expected?.truncated ?? false);
                     }
                 }
-                expect(await renderSearchArchiveOffThread(db, SESSION, 50, 60, 6000)).toBeNull();
+                expect(
+                    (await renderSearchArchiveOffThread(db, SESSION, 50, 60, 6000)).text,
+                ).toBeNull();
             }
         }
     } finally {
@@ -110,6 +115,40 @@ it("worker archive is byte-identical for mapped and legacy rows in every ctx_exp
         f.cleanup();
     }
 }, 120000);
+
+it("cross-session archive-only read serves the target off-thread with zero main-thread reads", async () => {
+    const f = fixture();
+    const raw = hostStore(join(f.dir, "opencode.db"), 20, 42);
+    const db = contextStore(join(f.dir, "context.db"));
+    process.env.OPENCODE_DB = join(f.dir, "opencode.db");
+    try {
+        addArchive(db);
+        const insert = db.prepare(`INSERT INTO message_history_fts
+            (session_id,message_ordinal,message_id,role,content) VALUES (?,?,?,?,?)`);
+        insert.run("ses-target", 1, "t1", "user", "cross target text");
+        insert.run("ses-target", 2, "t2", "assistant", "cross target reply");
+        await runMessageFtsRowidMapBackfill(db);
+        // The comparison read is synchronous and counts on this thread; snapshot
+        // the counters after it so only the off-thread call's reads are measured.
+        const expected = renderSearchArchive(db, "ses-target", 1, 2, 6000, true);
+        expect(expected).toContain("[1] U: cross target text");
+        resetExactOrdinalScansOnThisThreadForTest();
+        const archiveReads = getArchiveReadsOnThisThreadForTest();
+        const offThread = await renderSearchArchiveOffThread(db, "ses-target", 1, 2, 6000, true);
+        expect(offThread.text).toBe(expected);
+        expect(offThread.truncated).toBe(false);
+        expect(offThread.text).not.toContain("PRIVATE OTHER SESSION");
+        expect(
+            (await renderSearchArchiveOffThread(db, "ses-target", 9, 10, 6000, true)).text,
+        ).toBeNull();
+        expect(getArchiveReadsOnThisThreadForTest() - archiveReads).toBe(0);
+        expect(getExactOrdinalScansOnThisThreadForTest()).toBe(0);
+    } finally {
+        raw.close();
+        db.close();
+        f.cleanup();
+    }
+}, 60000);
 
 it("ctx_expand performs zero exact full-scan, archive, or coverage reads on the main thread", async () => {
     const f = fixture();

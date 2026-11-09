@@ -84,7 +84,7 @@ serveWorkerJobs<RawOrdinalWarmupInput>(async (input, port) => {
                 await runMessageFtsRowidMapBackfill(db);
                 reply = { kind: "fts-rowid-backfill" };
             } else if (input.searchArchive) {
-                const { renderSearchArchive } = await import(
+                const { renderSearchArchiveWithStatus } = await import(
                     "../../tools/ctx-expand/search-archive"
                 );
                 const { readRawSessionMessageIdOrdinalsForRangeFromDb } = await import(
@@ -93,28 +93,30 @@ serveWorkerJobs<RawOrdinalWarmupInput>(async (input, port) => {
                 const archive = input.searchArchive;
                 let raw: InstanceType<typeof Database> | undefined;
                 try {
+                    const rendered = renderSearchArchiveWithStatus(
+                        db,
+                        input.sessionId,
+                        archive.start,
+                        archive.end,
+                        archive.tokenBudget,
+                        archive.archiveOnly,
+                        () => {
+                            if (!archive.rawPath) return new Map(archive.rawIds);
+                            raw = new Database(archive.rawPath, { readonly: true });
+                            openConnections.add(raw);
+                            raw.exec("PRAGMA busy_timeout = 250");
+                            return readRawSessionMessageIdOrdinalsForRangeFromDb(
+                                raw,
+                                input.sessionId,
+                                archive.start,
+                                archive.end,
+                            );
+                        },
+                    );
                     reply = {
                         kind: "search-archive",
-                        text: renderSearchArchive(
-                            db,
-                            input.sessionId,
-                            archive.start,
-                            archive.end,
-                            archive.tokenBudget,
-                            archive.archiveOnly,
-                            () => {
-                                if (!archive.rawPath) return new Map(archive.rawIds);
-                                raw = new Database(archive.rawPath, { readonly: true });
-                                openConnections.add(raw);
-                                raw.exec("PRAGMA busy_timeout = 250");
-                                return readRawSessionMessageIdOrdinalsForRangeFromDb(
-                                    raw,
-                                    input.sessionId,
-                                    archive.start,
-                                    archive.end,
-                                );
-                            },
-                        ),
+                        text: rendered?.text ?? null,
+                        truncated: rendered?.truncated ?? false,
                     };
                 } finally {
                     if (raw) openConnections.delete(raw);

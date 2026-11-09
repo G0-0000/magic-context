@@ -74,7 +74,7 @@ export type RawOrdinalWarmupReply =
     | { kind: "tag-delta"; delta: TagOwnerDelta }
     | { kind: "indexed"; inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { kind: "exact-ordinal-ids"; ids: Array<[number, string | null]> }
-    | { kind: "search-archive"; text: string | null }
+    | { kind: "search-archive"; text: string | null; truncated: boolean }
     | { kind: "fts-rowid-backfill" }
     | { kind: "error"; error: string; code?: string; errcode?: number };
 
@@ -179,7 +179,7 @@ export function runSessionWarmupWorker(
                 | { delta: TagOwnerDelta }
                 | { inserted: boolean; measurements?: IndexWorkerMeasurements }
                 | { exactOrdinalIds: Array<[number, string | null]> }
-                | { searchArchive: string | null }
+                | { searchArchive: { text: string | null; truncated: boolean } }
                 | { ftsRowidBackfill: true }
                 | {
                       failure: RawOrdinalWarmupFailureReason;
@@ -259,7 +259,8 @@ export function runSessionWarmupWorker(
             else if (reply.kind === "indexed")
                 finish({ inserted: reply.inserted, measurements: reply.measurements });
             else if (reply.kind === "exact-ordinal-ids") finish({ exactOrdinalIds: reply.ids });
-            else if (reply.kind === "search-archive") finish({ searchArchive: reply.text });
+            else if (reply.kind === "search-archive")
+                finish({ searchArchive: { text: reply.text, truncated: reply.truncated } });
             else if (reply.kind === "fts-rowid-backfill") finish({ ftsRowidBackfill: true });
             else
                 finish({
@@ -377,7 +378,7 @@ type WorkerResult =
     | { delta: TagOwnerDelta }
     | { inserted: boolean; measurements?: IndexWorkerMeasurements }
     | { exactOrdinalIds: Array<[number, string | null]> }
-    | { searchArchive: string | null }
+    | { searchArchive: { text: string | null; truncated: boolean } }
     | { ftsRowidBackfill: true }
     | { failure: RawOrdinalWarmupFailureReason; detail: string; code?: string; errcode?: number };
 

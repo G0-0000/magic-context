@@ -283,6 +283,264 @@ it("Pi tag recovery pairs the raw invocation and result without returning siblin
 	}
 });
 
+describe("Pi ctx_expand cross-session", () => {
+	const CALLER = "ses-pi-caller";
+	const TARGET = "ses-pi-target";
+	const CALLER_IDENTITY = "git:pi-proj";
+
+	function mapSession(
+		db: ReturnType<typeof createTestDb>,
+		sessionId: string,
+		identities: string[],
+	): void {
+		const insert = db.prepare(
+			"INSERT INTO session_projects(session_id, harness, project_path, updated_at) VALUES (?,?,?,?)",
+		);
+		identities.forEach((identity, index) => {
+			insert.run(sessionId, index === 0 ? "pi" : "opencode", identity, 1);
+		});
+	}
+
+	function seedTargetArchive(db: ReturnType<typeof createTestDb>): void {
+		const insert = db.prepare(
+			"INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content) VALUES (?,?,?,?,?)",
+		);
+		insert.run(TARGET, 1, "t1", "user", "pi target indexed alpha");
+		insert.run(TARGET, 2, "t2", "assistant", "pi target indexed beta");
+	}
+
+	function setup(): {
+		db: ReturnType<typeof createTestDb>;
+		tool: ReturnType<typeof createCtxExpandTool>;
+	} {
+		const db = createTestDb();
+		mapSession(db, TARGET, [CALLER_IDENTITY]);
+		mapSession(db, "ses-pi-foreign", ["git:pi-other"]);
+		mapSession(db, "ses-pi-ambiguous", [CALLER_IDENTITY, "git:pi-other"]);
+		seedTargetArchive(db);
+		return {
+			db,
+			tool: createCtxExpandTool({
+				db,
+				resolveProjectIdentity: () => CALLER_IDENTITY,
+			}),
+		};
+	}
+
+	const callerContext = fakeContext(CALLER, process.cwd(), ["entry-1"]);
+	const call = (
+		tool: ReturnType<typeof createCtxExpandTool>,
+		params: Record<string, unknown>,
+		ctx: unknown = callerContext,
+	) =>
+		tool.execute(
+			"expand",
+			params as never,
+			new AbortController().signal,
+			undefined,
+			ctx as never,
+		);
+
+	it("expands another session of the same project from its search archive", async () => {
+		const { db, tool } = setup();
+		try {
+			const one = textOf(await call(tool, { sessionId: TARGET, message: 1 }));
+			expect(one).toStartWith("From the search archive of session ses-pi-target:");
+			expect(one).toContain("[1] U: pi target indexed alpha");
+			expect(one).toContain(
+				"indexed text only; no surrounding messages or tool output",
+			);
+
+			const range = textOf(
+				await call(tool, { sessionId: TARGET, start: 1, end: 2 }),
+			);
+			expect(range).toContain("[1] U: pi target indexed alpha");
+			expect(range).toContain("[2] A: pi target indexed beta");
+		} finally {
+			db.close();
+		}
+	});
+
+	it("refuses foreign, missing, and ambiguous targets with distinct errors", async () => {
+		const { db, tool } = setup();
+		try {
+			const foreign = await call(tool, { sessionId: "ses-pi-foreign", message: 1 });
+			expect(foreign.isError).toBe(true);
+			expect(textOf(foreign)).toContain("different project");
+
+			const missing = await call(tool, { sessionId: "ses-pi-missing", message: 1 });
+			expect(missing.isError).toBe(true);
+			expect(textOf(missing)).toContain("no recorded project mapping");
+
+			const ambiguous = await call(tool, {
+				sessionId: "ses-pi-ambiguous",
+				message: 1,
+			});
+			expect(ambiguous.isError).toBe(true);
+			expect(textOf(ambiguous)).toContain("multiple projects");
+		} finally {
+			db.close();
+		}
+	});
+
+	it("refuses tag and verbose modes for another session", async () => {
+		const { db, tool } = setup();
+		try {
+			const tag = await call(tool, { sessionId: TARGET, tag: 3 });
+			expect(tag.isError).toBe(true);
+			expect(textOf(tag)).toContain("session-local");
+
+			const verbose = await call(tool, {
+				sessionId: TARGET,
+				start: 1,
+				end: 2,
+				verbose: true,
+			});
+			expect(verbose.isError).toBe(true);
+			expect(textOf(verbose)).toContain(
+				"verbose ranges are not available for cross-session expand",
+			);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("keeps the target sessionId in the continuation hint", async () => {
+		const db = createTestDb();
+		try {
+			mapSession(db, TARGET, [CALLER_IDENTITY]);
+			const insert = db.prepare(
+				"INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content) VALUES (?,?,?,?,?)",
+			);
+			insert.run(TARGET, 1, "t1", "user", `x${"y".repeat(1_000_000)}`);
+			insert.run(TARGET, 2, "t2", "user", "second block");
+			const tool = createCtxExpandTool({
+				db,
+				resolveProjectIdentity: () => CALLER_IDENTITY,
+			});
+			const text = textOf(
+				await call(tool, { sessionId: TARGET, start: 1, end: 2 }),
+			);
+			expect(text).toContain(
+				'ctx_expand(sessionId="ses-pi-target", start=2, end=2)',
+			);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("reports an empty archive distinctly from a missing message", async () => {
+		const { db, tool } = setup();
+		try {
+			const result = await call(tool, { sessionId: TARGET, message: 999 });
+			expect(result.isError).not.toBe(true);
+			expect(textOf(result)).toContain(
+				"No indexed text for session ses-pi-target in range 999-999",
+			);
+			expect(textOf(result)).toContain(
+				"not proof that the original message was never there",
+			);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("decodes a reduced call whose summary carries the target sessionId", async () => {
+		const { db, tool } = setup();
+		try {
+			const result = await call(tool, {
+				reduced: true,
+				summary: JSON.stringify({ sessionId: TARGET, message: 1 }),
+			});
+			expect(textOf(result)).toContain("[1] U: pi target indexed alpha");
+		} finally {
+			db.close();
+		}
+	});
+
+	it("treats an equal sessionId as the current session and never crosses", async () => {
+		const { db, tool } = setup();
+		try {
+			const live = fakeContext(
+				CALLER,
+				process.cwd(),
+				["entry-1"],
+				[userMessage("live caller text", 1)],
+			);
+			const omitted = textOf(
+				await call(tool, { start: 1, end: 1 }, live),
+			);
+			const equal = textOf(
+				await call(tool, { sessionId: CALLER, start: 1, end: 1 }, live),
+			);
+			expect(equal).toBe(omitted);
+			expect(equal).not.toStartWith("From the search archive of session");
+		} finally {
+			db.close();
+		}
+	});
+
+	it("refuses message mode with verbose for another session", async () => {
+		const { db, tool } = setup();
+		try {
+			const verbose = await call(tool, {
+				sessionId: TARGET,
+				message: 1,
+				verbose: true,
+			});
+			expect(verbose.isError).toBe(true);
+			expect(textOf(verbose)).toContain(
+				"verbose ranges are not available for cross-session expand",
+			);
+			expect(textOf(verbose)).not.toContain("pi target indexed alpha");
+		} finally {
+			db.close();
+		}
+	});
+
+	it("refuses messages indexed before the target session changed project", async () => {
+		const db = createTestDb();
+		try {
+			mapSession(db, CALLER, [CALLER_IDENTITY]);
+			db.prepare(
+				"INSERT INTO session_projects(session_id, harness, project_path, updated_at) VALUES (?,?,?,?)",
+			).run("ses-pi-moved", "pi", CALLER_IDENTITY, 5000);
+			const insert = db.prepare(
+				"INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content) VALUES (?,?,?,?,?)",
+			);
+			insert.run("ses-pi-moved", 1, "m1", "user", "old project alpha");
+			insert.run("ses-pi-moved", 2, "m2", "assistant", "new project beta");
+			// Attribution times come from the sidecar; map both rows.
+			const rowids = db.prepare(
+				"SELECT message_ordinal AS ordinal, rowid FROM message_history_fts WHERE session_id = ? ORDER BY message_ordinal",
+			);
+			const mapInsert = db.prepare(
+				"INSERT INTO message_fts_rowid_map(session_id, message_ordinal, fts_rowid, message_time_ms) VALUES (?,?,?,?)",
+			);
+			for (const row of rowids.all("ses-pi-moved") as Array<{ ordinal: number; rowid: number }>) {
+				mapInsert.run("ses-pi-moved", row.ordinal, row.rowid, row.ordinal === 1 ? 1000 : 6000);
+			}
+			const tool = createCtxExpandTool({
+				db,
+				resolveProjectIdentity: () => CALLER_IDENTITY,
+			});
+
+			const stale = await call(tool, { sessionId: "ses-pi-moved", message: 1 });
+			expect(stale.isError).toBe(true);
+			expect(textOf(stale)).toContain("indexed before the session changed project");
+			expect(textOf(stale)).not.toContain("old project alpha");
+
+			const fresh = textOf(
+				await call(tool, { sessionId: "ses-pi-moved", message: 2 }),
+			);
+			expect(fresh).toContain("new project beta");
+			expect(fresh).not.toContain("old project alpha");
+		} finally {
+			db.close();
+		}
+	});
+});
+
 it("leaves a background reader's raw-message provider in place", async () => {
 	const db = createTestDb();
 	const sessionId = "ses-pi-expand-shared-provider";

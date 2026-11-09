@@ -145,6 +145,74 @@ describe("OpenCode 2 ctx_expand ordinal resolution", () => {
         }
     }, 30_000);
 
+    it("expands another session's indexed text through the archive with the ownership gate", async () => {
+        const { dir: root, cleanup } = createTestTempDir("mc-v2-ctx-expand-cross-session-");
+        let contextDb: Database | undefined;
+        try {
+            contextDb = new Database(join(root, "context.db"));
+            initializeDatabase(contextDb);
+            runMigrations(contextDb);
+            const insertMapping = contextDb.prepare(
+                "INSERT INTO session_projects(session_id, harness, project_path, updated_at) VALUES (?,?,?,?)",
+            );
+            insertMapping.run(SESSION_ID, "opencode", "git:v2-cross", 1);
+            insertMapping.run("ses-v2-target", "opencode", "git:v2-cross", 1);
+            insertMapping.run("ses-v2-foreign", "opencode", "git:v2-other", 1);
+            const insertArchive = contextDb.prepare(
+                "INSERT INTO message_history_fts(session_id, message_ordinal, message_id, role, content) VALUES (?,?,?,?,?)",
+            );
+            insertArchive.run("ses-v2-target", 1, "t1", "user", "v2 cross session indexed text");
+            const ctxExpand = createCtxExpandTools({
+                db: contextDb as never,
+                resolveProjectPath: () => "git:v2-cross",
+            }).ctx_expand;
+            const context = { sessionID: SESSION_ID, directory: root } as never;
+
+            const hit = await ctxExpand.execute(
+                { sessionId: "ses-v2-target", message: 1 },
+                context,
+            );
+            expect(hit).toStartWith("From the search archive of session ses-v2-target:");
+            expect(hit).toContain("[1] U: v2 cross session indexed text");
+
+            const foreign = await ctxExpand.execute(
+                { sessionId: "ses-v2-foreign", message: 1 },
+                context,
+            );
+            expect(foreign).toContain("different project");
+
+            const missing = await ctxExpand.execute(
+                { sessionId: "ses-v2-missing", message: 1 },
+                context,
+            );
+            expect(missing).toContain("no recorded project mapping");
+
+            // A session that moved projects keeps old-project rows indexed
+            // under the same session id; the attribution gate must refuse them.
+            insertMapping.run("ses-v2-moved", "opencode", "git:v2-cross", 5000);
+            insertArchive.run("ses-v2-moved", 1, "mv1", "user", "v2 pre-move text");
+            const movedRow = contextDb
+                .prepare(
+                    "SELECT rowid FROM message_history_fts WHERE session_id = ? AND message_ordinal = ?",
+                )
+                .get("ses-v2-moved", 1) as { rowid: number };
+            contextDb
+                .prepare(
+                    "INSERT INTO message_fts_rowid_map(session_id, message_ordinal, fts_rowid, message_time_ms) VALUES (?,?,?,?)",
+                )
+                .run("ses-v2-moved", 1, movedRow.rowid, 1000);
+            const moved = await ctxExpand.execute(
+                { sessionId: "ses-v2-moved", message: 1 },
+                context,
+            );
+            expect(moved).toContain("indexed before the session changed project");
+            expect(moved).not.toContain("v2 pre-move text");
+        } finally {
+            contextDb?.close();
+            cleanup();
+        }
+    });
+
     it("does not relabel the first source message as an out-of-range ordinal", async () => {
         const { dir: root, cleanup } = createTestTempDir("mc-v2-ctx-expand-ordinal-");
         const path = join(root, "opencode.db");

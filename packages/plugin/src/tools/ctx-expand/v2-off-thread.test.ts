@@ -30,7 +30,9 @@ test("v2 ctx_expand range, message and tag never call synchronous provider reade
         for (const [id, n] of ids) insert.run(n, n % 2 ? id : `pruned-${n}`, `archive ${n}`);
         const expected = renderSearchArchive(db, "s", 26_640, 26_662, 6000, false, () => ids);
         expect(expected).toContain("archive 26640");
-        expect(await renderSearchArchiveOffThread(db, "s", 26_640, 26_662, 6000)).toBe(expected);
+        expect((await renderSearchArchiveOffThread(db, "s", 26_640, 26_662, 6000)).text).toBe(
+            expected,
+        );
         const expand = createCtxExpandTools({ db }).ctx_expand;
         expect(await expand.execute({ message: 26_640 }, { sessionID: "s" } as never)).toContain(
             "archive 26640",
@@ -60,7 +62,9 @@ test("v2 ctx_expand range, message and tag never call synchronous provider reade
             false,
             () => revertedIds,
         );
-        expect(await renderSearchArchiveOffThread(db, "s", 26_640, 26_662, 6000)).toBe(reverted);
+        expect((await renderSearchArchiveOffThread(db, "s", 26_640, 26_662, 6000)).text).toBe(
+            reverted,
+        );
         expect(await expand.execute({ tag }, { sessionID: "s" } as never)).toBe(
             "Tag 1's original text is no longer in stored history.",
         );
