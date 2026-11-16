@@ -85,6 +85,7 @@ export function searchMemoriesFTS(
     query: string,
     limit = DEFAULT_SEARCH_LIMIT,
     dateRange: MemorySearchDateRange | null = null,
+    allowRelaxedFallback = true,
 ): Memory[] {
     const trimmedQuery = query.trim();
     if (trimmedQuery.length === 0 || limit <= 0) {
@@ -105,7 +106,7 @@ export function searchMemoriesFTS(
             limit,
         )
         .filter(isMemoryRow);
-    if (rows.length === 0) {
+    if (allowRelaxedFallback && rows.length === 0) {
         const relaxed = relaxedFtsQuery(trimmedQuery);
         if (relaxed)
             rows = getSearchStatement(db, dateRange !== null)
@@ -130,6 +131,7 @@ export function searchMemoriesFTSUnion(
     ownIdentities?: readonly string[],
     shareCategories?: readonly string[] | null,
     dateRange: MemorySearchDateRange | null = null,
+    allowRelaxedFallback = true,
 ): Memory[] {
     const identities = uniqueProjectPaths(projectPaths);
     if (identities.length === 0) return [];
@@ -149,7 +151,7 @@ export function searchMemoriesFTSUnion(
         })(),
     });
     if (identities.length === 1 && !sharingFilter.active) {
-        return searchMemoriesFTS(db, identities[0], query, limit, dateRange);
+        return searchMemoriesFTS(db, identities[0], query, limit, dateRange, allowRelaxedFallback);
     }
 
     const trimmedQuery = query.trim();
@@ -181,7 +183,7 @@ export function searchMemoriesFTSUnion(
               )
               .filter(isMemoryRow);
 
-    if (rows.length === 0) {
+    if (allowRelaxedFallback && rows.length === 0) {
         const relaxed = relaxedFtsQuery(trimmedQuery);
         if (relaxed) {
             rows = (

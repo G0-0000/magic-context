@@ -646,6 +646,8 @@ describe("unifiedSearch", () => {
             suppressedVisibleMemoryIds: [],
             suppressedLiveMessageMatches: 0,
             gitCommitUnavailable: null,
+            wikiUnavailable: null,
+            wikiPartial: false,
         };
 
         // Each variant reaches a different prepared statement: plain, ordinal

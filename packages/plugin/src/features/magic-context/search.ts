@@ -29,6 +29,7 @@ import {
 import { cosineSimilarity } from "./memory/cosine-similarity";
 import { embedText, getProjectEmbeddingSnapshot, isEmbeddingEnabled } from "./memory/embedding";
 import type { SynapseClientLike } from "./memory/embedding-synapse";
+import { normalizeStoredProjectPath } from "./memory/project-identity";
 import { relaxedFtsQuery, sanitizeFtsQuery } from "./memory/storage-memory-fts";
 import {
     MESSAGE_FTS_SESSION_FILTER_SQL,
@@ -36,7 +37,6 @@ import {
     withMessageFtsSessionSetFilter,
 } from "./message-fts-session-filter";
 import { getIndexedMessageCorpusSize } from "./message-index";
-import { normalizeStoredProjectPath } from "./memory/project-identity";
 import { getMessageIndexEpoch, isMessageIndexSearchable } from "./message-index-async";
 import { recordShadowMeasurement } from "./search-measurement";
 import {
@@ -52,6 +52,17 @@ import {
 } from "./search-rerank";
 import { getNotes, type Note } from "./storage-notes";
 import { getActivePrimers, type Primer } from "./storage-primers";
+import {
+    searchWikiCorpus,
+    type WikiCorpusHit,
+    type WikiDiagnosticReason,
+    wikiDiagnosticReason,
+} from "./wiki-search";
+import {
+    resolveWikiSectionHits,
+    type WikiSectionRecovery,
+    type WikiSectionRequest,
+} from "./wiki-section";
 import {
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
@@ -126,10 +137,14 @@ const projectWideBatchedMessageSearchStatements = new WeakMap<
     Database,
     Map<string, PreparedStatement>
 >();
-const projectWideBatchedFtsCountStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
+const projectWideBatchedFtsCountStatements = new WeakMap<
+    Database,
+    Map<string, PreparedStatement>
+>();
 const wholeTableMessageCountStatements = new WeakMap<Database, PreparedStatement>();
+const strictEvidenceStatements = new WeakMap<Database, Map<string, PreparedStatement>>();
 
-export type SearchSource = "memory" | "message" | "git_commit" | "primer" | "note";
+export type SearchSource = "memory" | "message" | "git_commit" | "primer" | "note" | "wiki";
 
 export interface CapturedQueryEmbedding {
     vector: Float32Array;
@@ -142,6 +157,10 @@ export interface UnifiedSearchDiagnostics {
     suppressedVisibleMemoryIds: number[];
     suppressedLiveMessageMatches: number;
     gitCommitUnavailable: "no_git_repository" | null;
+    /** Fixed token when the enabled global wiki source could not answer this search. */
+    wikiUnavailable: WikiDiagnosticReason | null;
+    /** Native cursor indicates that additional wiki results may remain beyond the bounded page. */
+    wikiPartial: boolean;
 }
 
 export function createUnifiedSearchDiagnostics(): UnifiedSearchDiagnostics {
@@ -149,6 +168,8 @@ export function createUnifiedSearchDiagnostics(): UnifiedSearchDiagnostics {
         suppressedVisibleMemoryIds: [],
         suppressedLiveMessageMatches: 0,
         gitCommitUnavailable: null,
+        wikiUnavailable: null,
+        wikiPartial: false,
     };
 }
 
@@ -175,6 +196,18 @@ export interface UnifiedSearchOptions {
     to?: number;
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
+    /**
+     * User-level global wiki corpus for the `wiki` source. The root is one
+     * process-global directory shared by every project; a project identity
+     * never reaches it. Omitted or disabled means the source is never loaded.
+     */
+    wiki?: import("../../config/schema/magic-context").WikiConfig;
+    /** Raw tool query reserved for wiki's literal CR/LF validation; all other lanes use the trimmed query. */
+    wikiQuery?: string;
+    /** Search wiki only after every selected internal lane misses, including visibility-suppressed hits. */
+    wikiFallback?: boolean;
+    /** Default fusion pre-run only: memory closes the wiki gate but cannot consume result/material slots. */
+    memoryGateOnly?: boolean;
     /** Deprecated: message search no longer reads raw messages on the hot path. */
     readMessages?: (sessionId: string) => unknown[];
     embedQuery?: (
@@ -184,6 +217,8 @@ export interface UnifiedSearchOptions {
     isEmbeddingRuntimeEnabled?: () => boolean;
     /** Only return message-history hits with ordinal ≤ this value (e.g. last compartment end). -1 or omit to search all. */
     maxMessageOrdinal?: number;
+    /** Stable ids of the real user prompt and executing assistant call; wiki-gate exclusion only. */
+    currentQueryMessageIds?: readonly string[];
     /** Include indexed git commits in the result set. Default false — the
      *  feature is gated behind experimental.git_commit_indexing config. */
     gitCommitsEnabled?: boolean;
@@ -441,6 +476,33 @@ export interface NoteSearchResult {
     sourceSessionId: string | null;
 }
 
+/**
+ * A literal content match in the user's global wiki corpus. Paths are relative
+ * to the configured user-level root; no session, ordinal or expand handle exists
+ * for this source.
+ */
+export interface WikiSearchResult {
+    source: "wiki";
+    /** Short single-line preview for ordinary ctx_search output. */
+    content: string;
+    /** Native snippet on direct reads; section text on the internal-miss fallback path. */
+    snippet: string;
+    score: number;
+    /** Path relative to the global wiki root. */
+    path: string;
+    /** 1-based line number of the match. */
+    line: number;
+    /** File mtime in epoch milliseconds, from the native match time. */
+    modifiedAtMs: number;
+    /** Enclosing Markdown heading, present only on the internal-miss fallback path. */
+    heading?: string | null;
+    /** 1-based inclusive section bounds, omitted when section reading falls back to the native snippet. */
+    sectionStartLine?: number;
+    sectionEndLine?: number;
+    /** Exact native matched text, including its original casing. */
+    matchText?: string;
+}
+
 export type UnifiedSearchResult = (
     | MemorySearchResult
     | MessageSearchResult
@@ -448,6 +510,7 @@ export type UnifiedSearchResult = (
     | GitCommitSearchResult
     | PrimerSearchResult
     | NoteSearchResult
+    | WikiSearchResult
 ) & { relevanceScore?: number };
 
 function normalizeLimit(limit?: number): number {
@@ -983,6 +1046,7 @@ function getFtsMatches(args: {
     limit: number;
     workspace?: SearchWorkspaceContext;
     dateRange: InclusiveDateRange | null;
+    allowRelaxedFallback?: boolean;
 }): Memory[] {
     try {
         return args.workspace?.isWorkspaced
@@ -994,8 +1058,16 @@ function getFtsMatches(args: {
                   args.workspace.ownIdentities,
                   args.workspace.shareCategories,
                   args.dateRange,
+                  args.allowRelaxedFallback,
               )
-            : searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit, args.dateRange);
+            : searchMemoriesFTS(
+                  args.db,
+                  args.projectPath,
+                  args.query,
+                  args.limit,
+                  args.dateRange,
+                  args.allowRelaxedFallback,
+              );
     } catch (error) {
         log(
             `[search] FTS query failed for "${args.query}": ${error instanceof Error ? error.message : String(error)}`,
@@ -1131,9 +1203,14 @@ async function searchMemories(args: {
     dateRange: InclusiveDateRange | null;
     backfillMemoryEmbeddings?: boolean;
     lanes?: SearchLanes;
-}): Promise<{ results: MemorySearchResult[]; suppressedVisibleIds: number[] }> {
+    captureLexicalEvidence?: boolean;
+}): Promise<{
+    results: MemorySearchResult[];
+    suppressedVisibleIds: number[];
+    hasLexicalEvidence: boolean;
+}> {
     if (!args.memoryEnabled) {
-        return { results: [], suppressedVisibleIds: [] };
+        return { results: [], suppressedVisibleIds: [], hasLexicalEvidence: false };
     }
 
     const unfilteredMemories = args.workspace?.isWorkspaced
@@ -1150,7 +1227,7 @@ async function searchMemories(args: {
         timestampIsInRange(memory.createdAt, args.dateRange),
     );
     if (memories.length === 0) {
-        return { results: [], suppressedVisibleIds: [] };
+        return { results: [], suppressedVisibleIds: [], hasLexicalEvidence: false };
     }
 
     const ftsMatches = getFtsMatches({
@@ -1161,6 +1238,19 @@ async function searchMemories(args: {
         workspace: args.workspace,
         dateRange: args.dateRange,
     });
+    // The ordinary lane may use relaxed OR recall. Only a strict full-query
+    // hit is evidence for the wiki gate, including hits already visible.
+    const hasLexicalEvidence =
+        args.captureLexicalEvidence === true &&
+        getFtsMatches({
+            db: args.db,
+            projectPath: args.projectPath,
+            query: args.query,
+            limit: 1,
+            workspace: args.workspace,
+            dateRange: args.dateRange,
+            allowRelaxedFallback: false,
+        }).length > 0;
     const ftsScores = getFtsScores(ftsMatches);
     const semanticCandidates = selectSemanticCandidates({
         db: args.db,
@@ -1212,14 +1302,17 @@ async function searchMemories(args: {
             visibleMemoryIds: args.visibleMemoryIds,
         }).results;
     }
-    return mergeMemoryResults({
-        memories,
-        semanticScores,
-        ftsScores,
-        limit: args.limit,
-        visibleMemoryIds: args.visibleMemoryIds,
-        sourceNameByMemoryId,
-    });
+    return {
+        ...mergeMemoryResults({
+            memories,
+            semanticScores,
+            ftsScores,
+            limit: args.limit,
+            visibleMemoryIds: args.visibleMemoryIds,
+            sourceNameByMemoryId,
+        }),
+        hasLexicalEvidence,
+    };
 }
 
 /** Linear decay message scoring.
@@ -1525,7 +1618,11 @@ const PROJECT_WIDE_MESSAGE_MAP_JOIN = `LEFT JOIN message_fts_rowid_map AS map
              ON map.session_id = message_history_fts.session_id
             AND map.fts_rowid = message_history_fts.rowid`;
 
-function projectWideStatementKey(prefix: string, sessionCount: number, shape: ProjectWideQueryShape): string {
+function projectWideStatementKey(
+    prefix: string,
+    sessionCount: number,
+    shape: ProjectWideQueryShape,
+): string {
     return `${prefix}:${sessionCount}:${shape.cutoff === null ? "all" : "cutoff"}:${
         shape.dateRange === null ? "all-dates" : "dated"
     }:${shape.sessionSetFirst}`;
@@ -1748,6 +1845,198 @@ function countProjectWideSuppressedLiveMessages(args: {
     return typeof row?.count === "number" ? row.count : 0;
 }
 
+function countSessionSuppressedLiveMessages(args: {
+    db: Database;
+    sessionId: string;
+    ftsQuery: string;
+    cutoff: number;
+    dateRange: InclusiveDateRange | null;
+    sessionFirst: boolean;
+}): number {
+    if (args.ftsQuery.length === 0) return 0;
+    const dateJoin =
+        args.dateRange === null
+            ? ""
+            : `JOIN message_fts_rowid_map AS map
+                 ON map.session_id = message_history_fts.session_id
+                AND map.fts_rowid = message_history_fts.rowid`;
+    const datePredicate = args.dateRange === null ? "" : " AND map.message_time_ms BETWEEN ? AND ?";
+    const row = args.db
+        .prepare(
+            `SELECT COUNT(*) AS count
+               FROM message_history_fts
+               ${dateJoin}
+              WHERE ${args.sessionFirst ? MESSAGE_FTS_SESSION_FILTER_SQL : ""}message_history_fts.session_id = ?
+                AND message_history_fts MATCH ?
+                AND CAST(message_history_fts.message_ordinal AS INTEGER) > ?${datePredicate}`,
+        )
+        .get(
+            ...(args.sessionFirst ? [args.sessionId, args.sessionId] : [args.sessionId]),
+            contentOnlyMessageQuery(args.ftsQuery),
+            args.cutoff,
+            ...(args.dateRange === null ? [] : [args.dateRange.from, args.dateRange.to]),
+        ) as { count?: number } | undefined;
+    return typeof row?.count === "number" ? row.count : 0;
+}
+
+/**
+ * Live-tail count for one already-sanitized query on the lane's shape — the
+ * single session or the project-wide session set. Displayed diagnostics only.
+ */
+function countSuppressedLiveMatches(args: {
+    db: Database;
+    sessionId: string;
+    projectSessionIds: readonly string[] | null;
+    ftsQuery: string;
+    cutoff: number;
+    dateRange: InclusiveDateRange | null;
+    /** Single-session shape only; the project-wide count ignores it. */
+    sessionFirst?: boolean;
+}): number {
+    if (args.projectSessionIds !== null) {
+        return countProjectWideSuppressedLiveMessages({
+            db: args.db,
+            currentSessionId: args.sessionId,
+            ftsQuery: args.ftsQuery,
+            cutoff: args.cutoff,
+            dateRange: args.dateRange,
+        });
+    }
+    return countSessionSuppressedLiveMessages({
+        db: args.db,
+        sessionId: args.sessionId,
+        ftsQuery: args.ftsQuery,
+        cutoff: args.cutoff,
+        dateRange: args.dateRange,
+        sessionFirst: args.sessionFirst === true,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Wiki fallback gate: does this project already answer one STRICT query with a
+// raw lexical message? One bounded existence probe per query — never a count of
+// returned results, because the ordinary lane's limit, its relaxed fill and the
+// ownership filter on its rows must not decide the gate.
+
+interface StrictEvidenceShape {
+    sessionCount: number;
+    sessionSetFirst: boolean;
+    /** Candidate sessions whose binding moved; their pre-move rows never count. */
+    migratedCount: number;
+    currentQueryCount: number;
+    dated: boolean;
+}
+
+function getStrictEvidenceStatement(db: Database, shape: StrictEvidenceShape): PreparedStatement {
+    let statements = strictEvidenceStatements.get(db);
+    if (!statements) {
+        statements = new Map();
+        strictEvidenceStatements.set(db, statements);
+    }
+    const key = `${shape.sessionCount}:${shape.sessionSetFirst}:${shape.migratedCount}:${
+        shape.currentQueryCount
+    }:${shape.dated}`;
+    let statement = statements.get(key);
+    if (!statement) {
+        const placeholders = sessionSetPlaceholders(shape.sessionCount);
+        const predicates: string[] = [];
+        if (shape.sessionSetFirst) {
+            predicates.push(`+message_history_fts.rowid IN (
+        SELECT fts_rowid FROM message_fts_rowid_map
+         WHERE session_id IN (${placeholders})
+    )`);
+        }
+        predicates.push(
+            `message_history_fts.session_id IN (${placeholders})`,
+            "message_history_fts MATCH ?",
+        );
+        if (shape.currentQueryCount > 0) {
+            // The current prompt is the one hit the caller already holds. Its ids
+            // are excluded in every query shape, scoped to the current session:
+            // the same id in another session is a different message.
+            const ids = Array.from({ length: shape.currentQueryCount }, () => "?").join(", ");
+            predicates.push(
+                `(message_history_fts.session_id <> ? OR message_history_fts.message_id NOT IN (${ids}))`,
+            );
+        }
+        // Session-moved-projects rule, matching the result-level ownership filter:
+        // a row indexed before its session's binding change belongs to that
+        // session's previous project. Rows without a known index time stay
+        // attributed to the session's current project.
+        if (shape.migratedCount > 0) {
+            const arms = Array.from({ length: shape.migratedCount }, () => " WHEN ? THEN ?").join(
+                "",
+            );
+            predicates.push(
+                `(map.message_time_ms IS NULL OR map.message_time_ms >= CASE message_history_fts.session_id${arms} ELSE 0 END)`,
+            );
+        }
+        if (shape.dated) predicates.push("map.message_time_ms BETWEEN ? AND ?");
+        statement = db.prepare(
+            `SELECT 1 AS hit FROM message_history_fts ${PROJECT_WIDE_MESSAGE_MAP_JOIN}
+              WHERE ${predicates.join("\n   AND ")}
+              LIMIT 1`,
+        );
+        statements.set(key, statement);
+    }
+    return statement;
+}
+
+/**
+ * Strict message evidence for the wiki gate: one bounded `SELECT 1 … LIMIT 1`
+ * per full sanitized query and per literal probe, returning at the first hit. A
+ * raw lexical row is found directly — behind the lane's result limit, behind
+ * pre-migration rows of another session, or above the compartment cutoff it
+ * still counts, while the relaxed OR and semantic-only history never do.
+ */
+function hasStrictMessageEvidence(args: {
+    db: Database;
+    sessionIds: readonly string[];
+    currentSessionId: string;
+    mappingUpdatedAtMs: ReadonlyMap<string, number>;
+    dateRange: InclusiveDateRange | null;
+    currentQueryMessageIds: readonly string[];
+    ftsQueries: readonly string[];
+}): boolean {
+    const ftsQueries = [...new Set(args.ftsQueries.filter((ftsQuery) => ftsQuery.length > 0))];
+    if (ftsQueries.length === 0 || args.sessionIds.length === 0) return false;
+    const migrated = [...args.sessionIds]
+        .map((sessionId) => ({
+            sessionId,
+            movedAtMs: args.mappingUpdatedAtMs.get(sessionId) ?? 0,
+        }))
+        .filter((entry) => entry.movedAtMs > 0);
+    return withMessageFtsSessionSetFilter(args.db, args.sessionIds, (sessionSetFirst) => {
+        for (const ftsQuery of ftsQueries) {
+            const shape: StrictEvidenceShape = {
+                sessionCount: args.sessionIds.length,
+                sessionSetFirst,
+                migratedCount: migrated.length,
+                currentQueryCount: args.currentQueryMessageIds.length,
+                dated: args.dateRange !== null,
+            };
+            const bindings: unknown[] = [];
+            if (sessionSetFirst) bindings.push(...args.sessionIds);
+            bindings.push(...args.sessionIds, contentOnlyMessageQuery(ftsQuery));
+            if (shape.currentQueryCount > 0) {
+                bindings.push(args.currentSessionId, ...args.currentQueryMessageIds);
+            }
+            for (const entry of migrated) bindings.push(entry.sessionId, entry.movedAtMs);
+            if (args.dateRange !== null) {
+                bindings.push(args.dateRange.from, args.dateRange.to);
+            }
+            // An empty result is `null` on bun:sqlite and `undefined` on
+            // node:sqlite — read the row's own column, never its absence.
+            const row = getStrictEvidenceStatement(args.db, shape).get(...bindings) as
+                | { hit?: number }
+                | null
+                | undefined;
+            if (row?.hit === 1) return true;
+        }
+        return false;
+    });
+}
+
 // Reciprocal-rank-fusion constant. 60 is the canonical RRF k; it dampens the
 // reward gap between rank-0 and rank-1 so a candidate that appears in several
 // probe lists outranks one that tops a single list.
@@ -1919,19 +2208,28 @@ function searchMessagesInSnapshot(
     // No probes → original single-query path, byte-identical scoring. This is
     // the hot path (auto-search) and every plain natural-language query.
     if (probes.length === 0) {
-        const outcome =
-            args.diagnostics && cutoff !== null
-                ? runQueryWithDiagnostics(baseQuery, fetchLimit, cutoff)
-                : { rows: runQuery(baseQuery, fetchLimit), suppressedCount: 0 };
-        if (args.diagnostics) {
-            args.diagnostics.suppressedLiveMessageMatches = outcome.suppressedCount;
-        }
+        const collectDiagnostics = args.diagnostics !== undefined && cutoff !== null;
+        const outcome = collectDiagnostics
+            ? runQueryWithDiagnostics(baseQuery, fetchLimit, cutoff)
+            : { rows: runQuery(baseQuery, fetchLimit), suppressedCount: 0 };
         // Exact conjunctions remain the ranking authority; only empty searches
         // need a disjunction to recover a relevant term from a long question.
-        const rows =
-            outcome.rows.length > 0 || !args.relaxedRecall
-                ? outcome.rows
-                : runQuery(relaxedFtsQuery(args.query), fetchLimit);
+        const needsRelaxedRecall = outcome.rows.length === 0 && args.relaxedRecall === true;
+        const relaxedQuery = needsRelaxedRecall ? relaxedFtsQuery(args.query) : "";
+        const relaxedOutcome = needsRelaxedRecall
+            ? collectDiagnostics
+                ? runQueryWithDiagnostics(relaxedQuery, fetchLimit, cutoff)
+                : { rows: runQuery(relaxedQuery, fetchLimit), suppressedCount: 0 }
+            : null;
+        if (args.diagnostics) {
+            // The same live row can match both AND and OR; the gate needs presence,
+            // not a double-counted total.
+            args.diagnostics.suppressedLiveMessageMatches = Math.max(
+                outcome.suppressedCount,
+                relaxedOutcome?.suppressedCount ?? 0,
+            );
+        }
+        const rows = relaxedOutcome?.rows ?? outcome.rows;
         const renderRows = (limit: number) => {
             const filtered = rows.slice(0, limit);
             return filtered.map(
@@ -1989,8 +2287,26 @@ function searchMessagesInSnapshot(
         collectBaseDiagnostics && baseQuery.length > 0
             ? runQueryWithDiagnostics(baseQuery, fetchLimit, cutoff)
             : null;
-    if (args.diagnostics) {
-        args.diagnostics.suppressedLiveMessageMatches = baseOutcome?.suppressedCount ?? 0;
+    // The probe lane never relaxes, so its live-tail count is the strict one: the
+    // full AND query plus every literal probe. Probes overlap by design, so
+    // presence is a max, never a duplicate sum.
+    if (args.diagnostics && cutoff !== null) {
+        let suppressedLiveMessageMatches = baseOutcome?.suppressedCount ?? 0;
+        for (const entry of sanitizedProbes) {
+            suppressedLiveMessageMatches = Math.max(
+                suppressedLiveMessageMatches,
+                countSuppressedLiveMatches({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    projectSessionIds,
+                    ftsQuery: entry.query,
+                    cutoff,
+                    dateRange: args.dateRange,
+                    sessionFirst,
+                }),
+            );
+        }
+        args.diagnostics.suppressedLiveMessageMatches = suppressedLiveMessageMatches;
     }
     const searchQueries = [
         ...(!collectBaseDiagnostics && baseQuery.length > 0 ? [baseQuery] : []),
@@ -2513,6 +2829,9 @@ function getSourceBoost(result: UnifiedSearchResult): number {
             return PRIMER_SOURCE_BOOST;
         case "note":
             return 1;
+        case "wiki":
+            // Literal corpus matches carry no cross-source score; neutral.
+            return 1;
     }
 }
 
@@ -2577,6 +2896,7 @@ function searchGitCommits(args: {
     queryModelId?: string | null;
     dateRange: InclusiveDateRange | null;
     lanes?: SearchLanes;
+    captureLexicalEvidence?: (hasLexicalEvidence: boolean) => void;
 }): GitCommitSearchResult[] {
     if (args.limit <= 0) return [];
 
@@ -2587,6 +2907,7 @@ function searchGitCommits(args: {
         queryModelId: args.queryModelId,
         from: args.dateRange?.from,
         to: args.dateRange?.to,
+        captureLexicalEvidence: args.captureLexicalEvidence,
         captureLanes: lanes
             ? (fts, vector) => {
                   lanes.git_fts = fts.map(toGitCommitResult);
@@ -2611,6 +2932,7 @@ function searchPrimers(args: {
     queryModelId: string | null;
     dateRange: InclusiveDateRange | null;
     lanes?: SearchLanes;
+    captureLexicalEvidence?: (hasEvidence: boolean) => void;
 }): PrimerSearchResult[] {
     const primers = getActivePrimers(args.db, args.projectPath).filter((primer) =>
         timestampIsInRange(primer.createdAt, args.dateRange),
@@ -2662,6 +2984,9 @@ function searchPrimers(args: {
                 .slice(0, 25);
         }
     }
+    // FTS candidates are project/date eligible; capture them before semantic
+    // sorting and the lane limit can hide them behind semantic-only hits.
+    args.captureLexicalEvidence?.(ftsRanks.size > 0);
     const vectorResults: PrimerSearchResult[] = [];
     const scored = primers
         .map((primer) => {
@@ -2711,12 +3036,18 @@ function searchPrimers(args: {
     return scored;
 }
 
-function resolveSources(sources: SearchSource[] | undefined): Set<SearchSource> {
+function resolveSources(
+    sources: SearchSource[] | undefined,
+    wikiEnabled: boolean,
+): Set<SearchSource> {
     if (sources === undefined) {
         // Default: search all recall sources. Facts are deliberately NOT a
         // source — they're always rendered in <session-history> so searching
-        // them returns content the agent already sees.
-        return new Set<SearchSource>(["memory", "message", "git_commit", "primer", "note"]);
+        // them returns content the agent already sees. The global wiki corpus
+        // joins only when user-level config enables it.
+        const defaults: SearchSource[] = ["memory", "message", "git_commit", "primer", "note"];
+        if (wikiEnabled) defaults.push("wiki");
+        return new Set(defaults);
     }
     const set = new Set<SearchSource>();
     for (const source of sources) {
@@ -2725,12 +3056,145 @@ function resolveSources(sources: SearchSource[] | undefined): Set<SearchSource> 
             source === "message" ||
             source === "git_commit" ||
             source === "primer" ||
-            source === "note"
+            source === "note" ||
+            source === "wiki"
         ) {
             set.add(source);
         }
     }
     return set;
+}
+
+/** One native wiki hit as a section-read request; fallback hits carry their searched terms. */
+function wikiSectionRequest(hit: WikiCorpusHit): WikiSectionRequest {
+    return {
+        path: hit.path,
+        line: hit.line,
+        matchByteColumn: hit.matchByteColumn,
+        matchByteLength: hit.matchByteLength,
+        matchText: hit.matchText,
+        // Fallback hits carry the searched terms so a truncated native fragment
+        // can be re-anchored on the full original line.
+        matchTerms: hit.matchTerms,
+    };
+}
+
+/**
+ * Full-line recovery for the explicit lane. Only the limited hits that will
+ * actually be returned and still need it are read (`matchTerms` present and no
+ * verified `matchText`): their native preview otherwise starts at the
+ * truncated fragment. Each such hit is one request, so `maxSections` covers
+ * exactly them — the read is reused, no section is injected, and the explicit
+ * result count/order stays the caller's limit.
+ */
+async function recoverTruncatedFallbackHits(args: {
+    root: string;
+    hits: readonly WikiCorpusHit[];
+    signal?: AbortSignal;
+}): Promise<Array<WikiSectionRecovery | undefined>> {
+    const recoveries: Array<WikiSectionRecovery | undefined> = args.hits.map(() => undefined);
+    const indexes = args.hits.flatMap((hit, index) =>
+        hit.matchTerms !== undefined && hit.matchText === undefined ? [index] : [],
+    );
+    if (indexes.length === 0) return recoveries;
+    const resolutions = await resolveWikiSectionHits({
+        root: args.root,
+        requests: indexes.map((index) => wikiSectionRequest(args.hits[index]!)),
+        maxSections: indexes.length,
+        signal: args.signal,
+    });
+    for (let position = 0; position < indexes.length; position++) {
+        recoveries[indexes[position]!] = resolutions[position]?.recovery;
+    }
+    return recoveries;
+}
+
+async function searchWikiLane(args: {
+    root: string;
+    query: string;
+    limit: number;
+    dateRange: InclusiveDateRange | null;
+    signal?: AbortSignal;
+    diagnostics?: UnifiedSearchDiagnostics;
+    /** Internal-miss fallback: dedupe and enrich at most three Markdown sections. */
+    sections?: boolean;
+}): Promise<WikiSearchResult[]> {
+    const page = await searchWikiCorpus({
+        root: args.root,
+        query: args.query,
+        signal: args.signal,
+    });
+    if (page.partial && args.diagnostics) args.diagnostics.wikiPartial = true;
+    const inRange = page.hits.filter((hit) => timestampIsInRange(hit.modifiedAtMs, args.dateRange));
+    // Explicit/wiki-only searches keep their original snippets for ordinary
+    // hits and never read a file — except to re-anchor a fallback hit the SDK
+    // truncated, where the native preview still starts at the fragment.
+    if (!args.sections) {
+        const limited = inRange.slice(0, args.limit);
+        const recoveries = await recoverTruncatedFallbackHits({
+            root: args.root,
+            hits: limited,
+            signal: args.signal,
+        });
+        // FFF exposes no comparable fuzzy score; reuse the message lane's linear
+        // decay over the native result order instead of inventing one.
+        return limited.map((hit, rank) => {
+            const recovery = recoveries[rank];
+            const matchText = recovery?.matchText ?? hit.matchText;
+            return {
+                source: "wiki" as const,
+                content: recovery?.matchPreview ?? hit.preview,
+                snippet: recovery?.matchSnippet ?? hit.snippet,
+                score: linearDecayScore(rank, limited.length),
+                path: hit.path,
+                line: hit.line,
+                modifiedAtMs: hit.modifiedAtMs,
+                ...(matchText ? { matchText } : {}),
+            };
+        });
+    }
+
+    const resolutions = await resolveWikiSectionHits({
+        root: args.root,
+        requests: inRange.map(wikiSectionRequest),
+        maxSections: 3,
+        signal: args.signal,
+    });
+    const selected: Array<{
+        hit: (typeof inRange)[number];
+        resolution: (typeof resolutions)[number];
+    }> = [];
+    for (let index = 0; index < resolutions.length; index++) {
+        const resolution = resolutions[index]!;
+        if (resolution.status === "selected") {
+            selected.push({ hit: inRange[index]!, resolution });
+        }
+    }
+    return selected.map(({ hit, resolution }, rank) => {
+        const section = resolution.section;
+        const recovery = resolution.recovery;
+        const matchText = recovery?.matchText ?? hit.matchText;
+        return {
+            source: "wiki" as const,
+            // Classic content anchors on the recovered term when the bounded
+            // full-line read could place it; transient material keeps the
+            // section body as its snippet.
+            content: recovery?.matchPreview ?? hit.preview,
+            snippet: section?.excerpt ?? recovery?.matchSnippet ?? hit.snippet,
+            score: linearDecayScore(rank, selected.length),
+            path: hit.path,
+            line: hit.line,
+            modifiedAtMs: hit.modifiedAtMs,
+            ...(matchText ? { matchText } : {}),
+            ...(section
+                ? {
+                      heading: section.heading,
+                      sectionStartLine: section.startLine,
+                      sectionEndLine: section.endLine,
+                  }
+                : {}),
+        };
+    });
 }
 
 /** Turn memories already filtered through the visibility predicate into
@@ -2861,10 +3325,7 @@ function resolveProjectWideCandidateSessions(
             "SELECT session_id AS sessionId, project_path AS projectPath, updated_at AS updatedAt FROM session_projects",
         )
         .all() as Array<{ sessionId: string; projectPath: string; updatedAt: number }>;
-    const bindingsBySession = new Map<
-        string,
-        Array<{ identity: string; updatedAt: number }>
-    >();
+    const bindingsBySession = new Map<string, Array<{ identity: string; updatedAt: number }>>();
     for (const row of rows) {
         let bindings = bindingsBySession.get(row.sessionId);
         if (!bindings) {
@@ -2896,12 +3357,48 @@ function resolveProjectWideCandidateSessions(
     const currentUpdatedAt = admittedUpdatedAt(currentSessionId);
     if (currentUpdatedAt !== null) mappingUpdatedAtMs.set(currentSessionId, currentUpdatedAt);
     return {
-        sessionIds: [
-            currentSessionId,
-            ...others.slice(0, MAX_PROJECT_WIDE_SEARCH_SESSIONS - 1),
-        ],
+        sessionIds: [currentSessionId, ...others.slice(0, MAX_PROJECT_WIDE_SEARCH_SESSIONS - 1)],
         mappingUpdatedAtMs,
     };
+}
+
+/**
+ * The wiki fallback is a lane of last resort: the internal sources answered
+ * nothing, so the best section it found must survive whatever ordering, rerank
+ * pool, or token limit the final boundary applies. The lowest-ranked non-wiki
+ * result gives up its slot only when the limit is already full; ordinary
+ * (non-fallback) results and direct wiki ordering are never touched.
+ *
+ * Surviving wiki results then LEAD the returned array. The transient material
+ * reserves one header per source and then spends the rest of its budget on
+ * bodies in result order, so a relaxed or semantic row ahead of the section
+ * would consume that budget and leave the section as a bare path. Order only
+ * changes for the default fallback, where the remaining internal rows are
+ * relaxed/semantic recall — strict lexical evidence would have closed the gate
+ * and no wiki result would exist at all. Relative order inside each group is
+ * preserved.
+ *
+ * Memory, primer, note and lexical git evidence all close the gate before the
+ * fallback runs, so the evicted row can never be one whose citation the caller
+ * relies on.
+ */
+export function ensureWikiFallbackRepresentation(
+    results: UnifiedSearchResult[],
+    args: { wikiResults: readonly WikiSearchResult[]; wikiFallback: boolean; limit: number },
+): UnifiedSearchResult[] {
+    if (args.wikiFallback !== true) return results;
+    const best = args.wikiResults[0];
+    if (best === undefined) return results;
+    let kept = results;
+    // Any surviving wiki hit already represents the lane; never insert twice.
+    if (!kept.some((result) => result.source === "wiki")) {
+        kept = kept.length >= args.limit ? kept.slice(0, Math.max(0, args.limit - 1)) : kept;
+        kept = [...kept, best];
+    }
+    return [
+        ...kept.filter((result) => result.source === "wiki"),
+        ...kept.filter((result) => result.source !== "wiki"),
+    ];
 }
 
 export async function unifiedSearch(
@@ -2959,13 +3456,16 @@ export async function unifiedSearch(
         options.diagnostics.suppressedVisibleMemoryIds = [];
         options.diagnostics.suppressedLiveMessageMatches = 0;
         options.diagnostics.gitCommitUnavailable = null;
+        options.diagnostics.wikiUnavailable = null;
+        options.diagnostics.wikiPartial = false;
     }
 
     const embeddingEnabled = options.embeddingEnabled ?? true;
     const embedQuery = options.embedQuery ?? embedText;
     const isEmbeddingRuntimeEnabled = options.isEmbeddingRuntimeEnabled ?? isEmbeddingEnabled;
     const gitCommitsEnabled = options.gitCommitsEnabled ?? false;
-    const activeSources = resolveSources(options.sources);
+    const wikiConfig = options.wiki;
+    const activeSources = resolveSources(options.sources, wikiConfig?.enabled === true);
 
     const memoryFeatureEnabled = options.memoryEnabled ?? true;
     const runMemory = activeSources.has("memory") && memoryFeatureEnabled;
@@ -2980,6 +3480,7 @@ export async function unifiedSearch(
     }
     const runPrimers = activeSources.has("primer") && memoryFeatureEnabled;
     const runNotes = activeSources.has("note");
+    const runWiki = activeSources.has("wiki") && wikiConfig?.enabled === true;
     // Semantic history search is not a memory feature: it runs whenever
     // embedding is on, whatever `memory.enabled` says.
     const runCompartmentChunks = runMessages && embeddingEnabled;
@@ -3043,9 +3544,9 @@ export async function unifiedSearch(
             ? resolveProjectWideCandidateSessions(db, sessionId, projectPath)
             : null;
     const projectWideSessionIds = projectWideResolution?.sessionIds ?? null;
-    const mappingUpdatedAtMs = projectWideResolution?.mappingUpdatedAtMs ?? new Map<string, number>();
-    const projectWide =
-        projectWideSessionIds !== null && projectWideSessionIds.length > 1;
+    const mappingUpdatedAtMs =
+        projectWideResolution?.mappingUpdatedAtMs ?? new Map<string, number>();
+    const projectWide = projectWideSessionIds !== null && projectWideSessionIds.length > 1;
     const messageLaneSessions = projectWideSessionIds ?? [sessionId];
     // Issue-time check, per candidate: an unsearchable session is dropped from
     // the request, not from the whole lane — if the current session is
@@ -3062,6 +3563,7 @@ export async function unifiedSearch(
             maxOrdinal: options.maxMessageOrdinal,
             probes: messageProbes,
             relaxedRecall: options.explicitSearch,
+            // The diagnostics path buys the live-tail count; ordinary searches skip it.
             collectDiagnostics: options.diagnostics !== undefined,
             dateRange,
             projectSessionIds: projectWide ? eligibleMessageLaneSessions : undefined,
@@ -3099,6 +3601,32 @@ export async function unifiedSearch(
                     result.sessionId !== sessionId || result.messageId !== options.excludeMessageId,
             )
             .filter(attributedToThisProject);
+        // A raw project-wide AND hit can belong to another session's pre-move
+        // project. Once ownership filtering removes every such row, the relaxed
+        // live tail is the only measured match left; the displayed diagnostic
+        // reports that union. The gate itself never reads this count.
+        if (
+            options.wikiFallback === true &&
+            options.diagnostics &&
+            projectWide &&
+            messageProbes.length === 0 &&
+            options.maxMessageOrdinal != null &&
+            options.maxMessageOrdinal >= 0 &&
+            outcome.results.length > 0 &&
+            messageResults.length === 0
+        ) {
+            const relaxedSuppressed = countProjectWideSuppressedLiveMessages({
+                db,
+                currentSessionId: sessionId,
+                ftsQuery: relaxedFtsQuery(trimmedQuery),
+                cutoff: options.maxMessageOrdinal,
+                dateRange,
+            });
+            options.diagnostics.suppressedLiveMessageMatches = Math.max(
+                options.diagnostics.suppressedLiveMessageMatches,
+                relaxedSuppressed,
+            );
+        }
         if (lanes) lanes.message_fts = (outcome.laneResults ?? outcome.results).slice(0, 25);
         if (timings) timings.messageMs = performance.now() - stepStartedAt;
         recordAutoSearchLane(
@@ -3172,6 +3700,8 @@ export async function unifiedSearch(
         limit: tierLimit,
     });
 
+    let gitHasLexicalEvidence = false;
+    let primerHasLexicalEvidence = false;
     const [memoryOutcome, gitCommitResults, primerResults, noteResults] = await Promise.all([
         runMemory
             ? searchMemories({
@@ -3186,12 +3716,14 @@ export async function unifiedSearch(
                   workspace,
                   visibleMemoryIds: options.visibleMemoryIds,
                   backfillMemoryEmbeddings: options.backfillMemoryEmbeddings,
-                  lanes,
+                  captureLexicalEvidence: options.wikiFallback === true,
+                  lanes: options.memoryGateOnly ? undefined : lanes,
                   dateRange,
               })
             : Promise.resolve({
                   results: [] as MemorySearchResult[],
                   suppressedVisibleIds: [] as number[],
+                  hasLexicalEvidence: false,
               }),
         runGitCommits
             ? Promise.resolve(
@@ -3205,6 +3737,11 @@ export async function unifiedSearch(
                           embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
                       dateRange,
                       lanes,
+                      captureLexicalEvidence: options.wikiFallback
+                          ? (hasEvidence) => {
+                                gitHasLexicalEvidence = hasEvidence;
+                            }
+                          : undefined,
                   }),
               )
             : Promise.resolve([] as GitCommitSearchResult[]),
@@ -3220,6 +3757,11 @@ export async function unifiedSearch(
                           embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
                       dateRange,
                       lanes,
+                      captureLexicalEvidence: options.wikiFallback
+                          ? (hasEvidence) => {
+                                primerHasLexicalEvidence = hasEvidence;
+                            }
+                          : undefined,
                   }),
               )
             : Promise.resolve([] as PrimerSearchResult[]),
@@ -3252,6 +3794,72 @@ export async function unifiedSearch(
     if (options.diagnostics) {
         options.diagnostics.suppressedVisibleMemoryIds = memoryOutcome.suppressedVisibleIds;
     }
+
+    // Wiki is a fallback, not a competing recall lane: lexical internal evidence,
+    // including a memory suppressed because it is already visible, closes the gate.
+    // Message evidence is a raw lexical row and nothing else: the strict queries
+    // (full sanitized query plus literal probes) are checked for EXISTENCE in one
+    // bounded `SELECT 1 … LIMIT 1` each, so a hit behind the lane's result limit,
+    // behind pre-migration rows of another session, or above the compartment
+    // cutoff still counts — while a relaxed-OR row or a semantic-only history
+    // compartment never does. It runs only when the wiki lane could actually use
+    // the answer (the source is enabled and selected) and no other source
+    // answered: otherwise a wiki-disabled default search pays no extra probe.
+    const otherInternalEvidence =
+        memoryOutcome.hasLexicalEvidence ||
+        primerHasLexicalEvidence ||
+        noteResults.length > 0 ||
+        // Use pre-limit lexical evidence: a newer semantic tie can slice an
+        // older FTS/hybrid hit out of the returned results without erasing it.
+        gitHasLexicalEvidence;
+    const strictMessageEvidence =
+        !otherInternalEvidence &&
+        options.wikiFallback === true &&
+        runWiki &&
+        wikiConfig !== undefined &&
+        runMessages &&
+        eligibleMessageLaneSessions.length > 0 &&
+        parseIdShapedQuery(trimmedQuery) === null &&
+        hasStrictMessageEvidence({
+            db,
+            sessionIds: eligibleMessageLaneSessions,
+            currentSessionId: sessionId,
+            mappingUpdatedAtMs,
+            dateRange,
+            currentQueryMessageIds: options.currentQueryMessageIds ?? [],
+            ftsQueries: [
+                sanitizeFtsQuery(trimmedQuery),
+                ...messageProbes.map((probe) => sanitizeFtsQuery(probe)),
+            ],
+        });
+    const internalUsable = otherInternalEvidence || strictMessageEvidence;
+    let wikiResults: WikiSearchResult[] = [];
+    if (
+        runWiki &&
+        wikiConfig &&
+        (!options.wikiFallback || (!internalUsable && parseIdShapedQuery(trimmedQuery) === null))
+    ) {
+        if (options.signal?.aborted) return [];
+        try {
+            wikiResults = await searchWikiLane({
+                root: wikiConfig.source_root,
+                query: options.wikiQuery ?? trimmedQuery,
+                limit: tierLimit,
+                dateRange,
+                signal: options.signal,
+                diagnostics: options.diagnostics,
+                sections: options.wikiFallback === true,
+            });
+        } catch (error) {
+            if (options.signal?.aborted) return [];
+            const reason = wikiDiagnosticReason(error);
+            if (reason !== null) {
+                if (options.diagnostics) options.diagnostics.wikiUnavailable = reason;
+                log(`[search] wiki source unavailable (${reason})`);
+            }
+        }
+    }
+
     // Explicit-fusion-only reserved channel: report raw pre-merge,
     // epoch-checked candidates BEFORE the global limit slice and rerank can
     // drop them. Never collected for auto-search or plain explicit search.
@@ -3273,11 +3881,12 @@ export async function unifiedSearch(
     // mid-search must not consume a result slot that a valid other-session hit
     // could have filled — filtering after the limit slice cannot backfill.
     let results = [
-        ...memoryOutcome.results,
+        ...(options.memoryGateOnly ? [] : memoryOutcome.results),
         ...primerResults,
         ...messageLikeResults,
         ...gitCommitResults,
         ...noteResults,
+        ...wikiResults,
     ]
         .filter(
             (result) =>
@@ -3290,6 +3899,9 @@ export async function unifiedSearch(
     const originalLatencyMs = Date.now() - measurementStartedAt;
     if (lanes) {
         lanes.notes = noteResults.slice(0, 25);
+        // Fallback sections reach rerank before the final result limit;
+        // direct wiki keeps its old lane cap.
+        lanes.wiki = options.wikiFallback ? wikiResults : wikiResults.slice(0, limit);
         options.captureRerankLanes?.(lanes);
     }
     if (reranker && lanes) {
@@ -3303,7 +3915,7 @@ export async function unifiedSearch(
                 trimmedQuery,
                 results,
                 pool,
-                candidateTexts(db, sessionId, projectPath, pool),
+                candidateTexts(db, sessionId, projectPath, pool, trimmedQuery),
                 limit,
                 options.signal,
                 options.onRerankSkipped,
@@ -3321,9 +3933,16 @@ export async function unifiedSearch(
     // per-session fail-open rule as the pre-truncation pass and the reserved
     // channel.
     results = results.filter(
-        (result) =>
-            result.source !== "message" || messageLaneSessionStillCurrent(result.sessionId),
+        (result) => result.source !== "message" || messageLaneSessionStillCurrent(result.sessionId),
     );
+    // Final boundary: the rerank path replaces the whole array and a full limit
+    // evicts the weakest row, either of which can drop the wiki fallback it just
+    // paid for.
+    results = ensureWikiFallbackRepresentation(results, {
+        wikiResults,
+        wikiFallback: options.wikiFallback === true,
+        limit,
+    });
 
     if (!options.measurementDisabled) {
         void recordShadowMeasurement({
@@ -3444,6 +4063,16 @@ function formatUnifiedSearchResult(
             result.content,
         ].join("\n");
     }
+    if (result.source === "wiki") {
+        const location =
+            result.sectionStartLine !== undefined && result.sectionEndLine !== undefined
+                ? `${result.sectionStartLine}-${result.sectionEndLine} heading=${result.heading ?? ""}`
+                : `${result.line}`;
+        return [
+            `[${index}] [wiki] score=${result.score.toFixed(2)} path=${result.path}:${location}`,
+            result.content,
+        ].join("\n");
+    }
     if (result.source === "compartment") {
         return [
             `[${index}] [message] score=${result.score.toFixed(2)} compartment_id=${result.compartmentId} range=${result.startOrdinal}-${result.endOrdinal} match=${result.matchType} title=${result.title}`,
@@ -3455,12 +4084,29 @@ function formatUnifiedSearchResult(
     // A hit from another project session carries its full identity; the
     // persisted time renders only when the index actually knows it (never
     // fabricated from the ordinal).
-    const foreignSession = result.sessionId !== currentSessionId ? ` session=${result.sessionId}` : "";
+    const foreignSession =
+        result.sessionId !== currentSessionId ? ` session=${result.sessionId}` : "";
     const age = result.messageTimeMs !== null ? ` ${formatSearchAge(result.messageTimeMs)}` : "";
     return [
         `[${index}] [message] score=${result.score.toFixed(2)}${foreignSession}${age} ordinal=${result.messageOrdinal} range=${expandStart}-${expandEnd} role=${result.role}`,
         result.content,
     ].join("\n");
+}
+
+export function formatWikiSearchDiagnostics(
+    diagnostics: UnifiedSearchDiagnostics | undefined,
+): string {
+    if (!diagnostics) return "";
+    const lines: string[] = [];
+    if (diagnostics.wikiUnavailable !== null) {
+        lines.push(`Wiki: source unavailable (${diagnostics.wikiUnavailable}).`);
+    }
+    if (diagnostics.wikiPartial) {
+        lines.push(
+            "Wiki: more matches may exist beyond the bounded first page; this result may be incomplete.",
+        );
+    }
+    return lines.join("\n");
 }
 
 function formatSearchDiagnosticLines(
@@ -3495,6 +4141,8 @@ function formatSearchDiagnosticLines(
     if (diagnostics.gitCommitUnavailable === "no_git_repository") {
         lines.push("Git commits: no git repository — commit search unavailable for this project.");
     }
+    const wikiDiagnostics = formatWikiSearchDiagnostics(diagnostics);
+    if (wikiDiagnostics) lines.push(...wikiDiagnostics.split("\n"));
     return lines;
 }
 

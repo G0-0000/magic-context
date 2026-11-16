@@ -366,6 +366,7 @@ Sources (omit for all):
 - git_commit — commit history; "when did this change" (pair with message for regression hunts)
 - primer — reusable project Q&A the dreamer distils from recurring questions; "have we answered this before"
 - note — parked follow-ups with their recorded text; "did we leave a follow-up"
+- wiki — global read-only Markdown corpus; literal content matches with path and line, when enabled in user config
 Use from/to to restrict every source to an inclusive UTC date range.
 
 When enabled on OpenCode/Pi, queries without sources and sources containing memory plus other sources may synthesize a memory-cache answer fused with the selected non-memory retrieval summaries (not subject to the already-visible memory filter; ctx_memory get reads #id originals). Mixed sources use classic retrieval with memory removed before synthesis. sources:["memory"] queries the memory bank directly; an absent answer is terminal. Sources without memory (including []), from/to, and id queries use classic retrieval. A `limit` still routes to the cache; it bounds only the classic materials and the classic fallback, not the synthesized answer. The Rust module's own ctx_search always uses classic retrieval.
@@ -392,7 +393,7 @@ When enabled on OpenCode/Pi, queries without sources and sources containing memo
     "type": "string"
   },
   "sources": {
-    "description": "Restrict to these sources; omitting it or passing [] searches every source.",
+    "description": "Restrict to these sources; omitting it or passing [] searches every enabled source.",
     "type": "array",
     "items": {
       "type": "string",
@@ -401,7 +402,8 @@ When enabled on OpenCode/Pi, queries without sources and sources containing memo
         "message",
         "git_commit",
         "primer",
-        "note"
+        "note",
+        "wiki"
       ]
     }
   }

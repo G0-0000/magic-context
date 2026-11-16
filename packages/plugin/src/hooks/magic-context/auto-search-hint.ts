@@ -114,6 +114,17 @@ function renderFragment(
             );
             return truncate(compressed, charCap);
         }
+        case "wiki": {
+            // Defensive only: automatic hints never request the wiki source, so
+            // this branch exists to keep the union exhaustive.
+            const compressed = cavemanCompress(
+                cleanSearchText(result.content),
+                "ultra",
+                CURRENT_CAVEMAN_RULES,
+                wordRules,
+            );
+            return truncate(compressed, charCap);
+        }
     }
 }
 

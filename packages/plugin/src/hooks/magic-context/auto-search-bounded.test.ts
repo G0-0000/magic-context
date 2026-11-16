@@ -174,6 +174,38 @@ test("worker hint bytes match the original search and the pre-change golden payl
     expect(wire[0].parts[0].text).toBe(prompt + golden);
 });
 
+test("automatic hints never request the wiki source, even with a wiki-carrying caller", async () => {
+    let captured: import("../../features/magic-context/search").UnifiedSearchOptions | undefined;
+    const spy = spyOn(search, "searchAutoHint").mockImplementation(
+        (_db, _sessionId, _projectPath, _query, searchOptions) => {
+            captured = searchOptions;
+            return Promise.resolve([]);
+        },
+    );
+    try {
+        const outcome = await runAutoSearchHint({
+            sessionId: "no-wiki",
+            db,
+            messages: messages(),
+            options: {
+                ...options,
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                // A caller cannot smuggle the global corpus into an automatic
+                // hint: the runner builds its own search options.
+                wiki: { enabled: true, source_root: "/tmp/global-wiki" },
+            } as never,
+        });
+        expect(outcome).toEqual({ ok: true });
+        expect(captured?.sources).toEqual(["memory", "message", "git_commit"]);
+        // The automatic lane never carries the corpus config, so a wiki-enabled
+        // user config cannot make transform-time hints pay for a native search.
+        expect(captured?.wiki).toBeUndefined();
+    } finally {
+        spy.mockRestore();
+    }
+});
+
 test("late search results cannot mutate this turn or a later pass's bytes", async () => {
     const clock = deadlineClock();
     const entered = Promise.withResolvers<void>();

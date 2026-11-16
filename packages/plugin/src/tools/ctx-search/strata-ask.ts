@@ -62,7 +62,12 @@ import PROMPTS from "./strata-prompts.json";
 import type { CtxSearchSource } from "./types";
 
 export const VALID_SOURCES: ReadonlySet<CtxSearchSource> = new Set([
-    "memory", "message", "git_commit", "primer", "note",
+    "memory",
+    "message",
+    "git_commit",
+    "primer",
+    "note",
+    "wiki",
 ]);
 
 /** Query template; copy lives in strata-prompts.json (edit there, rebuild dists). */
@@ -207,7 +212,8 @@ export function strataRouteFor(normalizedArgs: object): "fusion" | "memory-only"
     if (!("sources" in args)) return "fusion";
     if (Array.isArray(args.sources)) {
         const sources = new Set(args.sources);
-        if (![...sources].every((source) => VALID_SOURCES.has(source as CtxSearchSource))) return null;
+        if (![...sources].every((source) => VALID_SOURCES.has(source as CtxSearchSource)))
+            return null;
         if (sources.has("memory")) return sources.size === 1 ? "memory-only" : "fusion";
     }
     return null;
@@ -770,7 +776,12 @@ interface AskRequest {
 }
 
 /** `choices[0].message.content` only; `reasoning_content` never reaches the answer. */
-function outcomeOf(json: unknown, config: StrataAskConnection, allowExternalRefs: boolean, db?: Database): StrataAskOutcome {
+function outcomeOf(
+    json: unknown,
+    config: StrataAskConnection,
+    allowExternalRefs: boolean,
+    db?: Database,
+): StrataAskOutcome {
     if (!json || typeof json !== "object") return fallback("invalid_reply");
     const choices = (json as { choices?: unknown }).choices;
     if (!Array.isArray(choices) || choices.length === 0) return fallback("invalid_reply");
@@ -786,27 +797,37 @@ function outcomeOf(json: unknown, config: StrataAskConnection, allowExternalRefs
     } catch {
         return fallback("invalid_reply");
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback("invalid_reply");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        return fallback("invalid_reply");
     const reply = parsed as Record<string, unknown>;
     if (
         Object.keys(reply).some((key) => !["answer", "memoryIds", "externalRefs"].includes(key)) ||
         typeof reply.answer !== "string" ||
         /[\r\n\u2028\u2029]/u.test(reply.answer) ||
         !reply.answer.trim() ||
-        /(?:第[一二三四五六七八九十百零两0-9０-９]+条记忆|记忆摘要|记忆列表|记忆依据|依据记忆)\s*[:：]/u.test(reply.answer) ||
+        /(?:第[一二三四五六七八九十百零两0-9０-９]+条记忆|记忆摘要|记忆列表|记忆依据|依据记忆)\s*[:：]/u.test(
+            reply.answer,
+        ) ||
         /[#＃]\s*[0-9０-９]+/u.test(reply.answer) ||
         /<\s*\/?\s*(?:table|tr|th|td)(?=[\s/>])/iu.test(reply.answer) ||
         /(?:^|\n)\s*\|[^\n]*\|/u.test(reply.answer) ||
         /(?:^|\n)[^\n]*\|[^\n]*\n\s*\|?\s*:?-{3,}/u.test(reply.answer) ||
         !Array.isArray(reply.memoryIds) ||
-        !reply.memoryIds.every((id: unknown) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
-        ("externalRefs" in reply && (!allowExternalRefs || !Array.isArray(reply.externalRefs) ||
-            !reply.externalRefs.every((ref: unknown) => typeof ref === "string")))
-    ) return fallback("invalid_reply");
+        !reply.memoryIds.every(
+            (id: unknown) => typeof id === "number" && Number.isSafeInteger(id) && id > 0,
+        ) ||
+        ("externalRefs" in reply &&
+            (!allowExternalRefs ||
+                !Array.isArray(reply.externalRefs) ||
+                !reply.externalRefs.every((ref: unknown) => typeof ref === "string")))
+    )
+        return fallback("invalid_reply");
     const ids = [...new Set(reply.memoryIds as number[])];
-    if (reply.answer.trim() === STRATA_ASK_MISS && reply.answer !== STRATA_ASK_MISS) return fallback("invalid_reply");
+    if (reply.answer.trim() === STRATA_ASK_MISS && reply.answer !== STRATA_ASK_MISS)
+        return fallback("invalid_reply");
     if (reply.answer === STRATA_ASK_MISS) {
-        return ids.length === 0 && (!Array.isArray(reply.externalRefs) || reply.externalRefs.length === 0)
+        return ids.length === 0 &&
+            (!Array.isArray(reply.externalRefs) || reply.externalRefs.length === 0)
             ? { status: "miss" }
             : fallback("invalid_reply");
     }
@@ -817,13 +838,17 @@ function outcomeOf(json: unknown, config: StrataAskConnection, allowExternalRefs
         if (!memory) return [];
         const chars = Array.from(memory.content.replace(/\s+/gu, " ").trim());
         const excerpt = (chars.slice(0, 80).join("") + (chars.length > 80 ? "…" : ""))
-            .replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+            .replace(/\\/g, "\\\\")
+            .replace(/\|/g, "\\|");
         return [`| #${id} | ${excerpt} |`];
     });
     const evidence = rows.length
         ? `| 记忆编号 | 记忆缩略 |\n| --- | --- |\n${rows.join("\n")}`
         : "无可核验的记忆依据";
-    return { status: "answered", text: `答案：\n${reply.answer.trim()}\n\n依据记忆：\n${evidence}\n${STRATA_ASK_FOOTER}` };
+    return {
+        status: "answered",
+        text: `答案：\n${reply.answer.trim()}\n\n依据记忆：\n${evidence}\n${STRATA_ASK_FOOTER}`,
+    };
 }
 
 /**
@@ -900,7 +925,12 @@ async function askOnce(args: AskRequest): Promise<StrataAskOutcome> {
         return fallback(chat.reason);
     }
     logSessionObservations(chat.json);
-    return outcomeOf(chat.json, args.config, args.allowExternalRefs ?? Boolean(args.transient), args.db);
+    return outcomeOf(
+        chat.json,
+        args.config,
+        args.allowExternalRefs ?? Boolean(args.transient),
+        args.db,
+    );
 }
 
 export function hasUnsafeStrataCache(prefixPath: string): boolean {

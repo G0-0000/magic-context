@@ -115,6 +115,23 @@ describe("ConfigEditor ⇄ schema parity", () => {
     expect(renderedDeprecatedControls).toEqual([]);
   });
 
+  it("#given the user-level wiki corpus #then it stays raw JSONC until a dedicated form exists", () => {
+    // The corpus root is one process-global, user-level setting shared by every
+    // project; the form has no user-tier section for it yet, so both leaves are
+    // claimed as deliberately omitted (raw JSONC) rather than silently unrendered.
+    expect(OMITTED_BY_DESIGN.wiki).toContain("raw JSONC");
+    for (const leaf of ["wiki.enabled", "wiki.source_root"]) {
+      expect(
+        RENDERED_PREFIXES.some((prefix) => isCoveredBy(leaf, prefix)),
+        `${leaf} must not be rendered by the form yet`,
+      ).toBe(false);
+      expect(
+        OMITTED_PREFIXES.some((prefix) => isCoveredBy(leaf, prefix)),
+        `${leaf} must be classified as omitted-by-design`,
+      ).toBe(true);
+    }
+  });
+
   it("#given the graduated features #then they are NOT referenced under the dead experimental.* namespace", () => {
     // experimental.* was graduated in v0.22.0; nothing should re-introduce it.
     const experimentalRefs = [...RENDERED_PREFIXES, ...OMITTED_PREFIXES].filter((p) =>

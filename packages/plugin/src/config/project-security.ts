@@ -410,6 +410,16 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    // Block-scoped, never field-scoped: the wiki corpus is ONE process-global
+    // user-level root, so a project must not disable, enable, or redirect any
+    // part of it. Dropping the whole block leaves the disabled default.
+    if ("wiki" in projectRaw) {
+        delete projectRaw.wiki;
+        warnings.push(
+            "Ignoring wiki from project config (security: the global wiki corpus is user-level only; all projects share one root).",
+        );
+    }
+
     // compaction.enabled is USER-tier only: a cloned repo must never silently
     // disable the user's context management (it changes how the window is
     // owned and interacts with native compaction state). Field-scoped, not

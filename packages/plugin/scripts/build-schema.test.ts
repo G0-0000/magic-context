@@ -53,6 +53,14 @@ describe("magic-context JSON schema", () => {
         expect(missing).toEqual([]);
     });
 
+    test("wiki rejects unknown keys in generated schema like the runtime validator", () => {
+        const schema = buildSchema();
+        const properties = schema.properties as
+            | Record<string, { additionalProperties?: boolean }>
+            | undefined;
+        expect(properties?.wiki?.additionalProperties).toBe(false);
+    });
+
     test("auto_update is present in the schema (issue #109 regression guard)", () => {
         const schema = JSON.parse(fs.readFileSync(schemaPath, "utf-8")) as {
             properties: Record<string, { type?: string; description?: string }>;

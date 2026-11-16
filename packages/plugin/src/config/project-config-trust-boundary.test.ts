@@ -6,6 +6,7 @@ import { isConfigLoadUntrusted } from "../plugin/embedding-bootstrap-helpers";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { isCommitRetentionPaused } from "./commit-retention-recovery";
 import { loadPluginConfigDetailed } from "./index";
+import { DEFAULT_WIKI_SOURCE_ROOT } from "./schema/magic-context";
 
 /**
  * A repository's project config may only tighten what the user configured. A
@@ -260,5 +261,42 @@ describe("project command block", () => {
             { command: "nope" },
         );
         expect(loaded.config.command).toEqual({ "my-cmd": { template: "user template" } });
+    });
+});
+
+// The global wiki corpus is one user-level, process-global setting: a
+// repository can neither enable nor disable nor redirect it. The whole block is
+// stripped before the merge, so the user's value survives and no project value
+// can fall back onto a schema default that differs from the user's.
+describe("project config cannot touch the user-level global wiki corpus", () => {
+    it("keeps the user's enabled root when the project tries to disable and redirect it", () => {
+        const loaded = loadUserAndProject(
+            { wiki: { enabled: true, source_root: "/home/g0/wiki-sources" } },
+            { wiki: { enabled: false, source_root: "/repo-controlled" } },
+        );
+        expect(loaded.config.wiki).toEqual({
+            enabled: true,
+            source_root: "/home/g0/wiki-sources",
+        });
+        expect(loaded.config.configWarnings?.join("\n")).toContain("Ignoring wiki");
+    });
+
+    it("cannot enable the corpus from a project block alone", () => {
+        const loaded = loadUserAndProject({}, { wiki: { enabled: true } });
+        expect(loaded.config.wiki).toEqual({
+            enabled: false,
+            source_root: DEFAULT_WIKI_SOURCE_ROOT,
+        });
+    });
+
+    it("cannot disable an enabled user corpus from a project block", () => {
+        const loaded = loadUserAndProject(
+            { wiki: { enabled: true } },
+            { wiki: { enabled: false } },
+        );
+        expect(loaded.config.wiki).toEqual({
+            enabled: true,
+            source_root: DEFAULT_WIKI_SOURCE_ROOT,
+        });
     });
 });

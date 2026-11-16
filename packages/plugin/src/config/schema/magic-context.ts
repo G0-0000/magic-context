@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { isValidLanguageCode } from "../../agents/language-directive";
 import { isValidCron } from "../../features/magic-context/dreamer/cron";
@@ -1006,6 +1007,53 @@ export const RerankConfigSchema = z
 
 export type RerankConfig = z.infer<typeof RerankConfigSchema>;
 
+/** Default corpus root for the global wiki source (this operator's local corpus). */
+export const DEFAULT_WIKI_SOURCE_ROOT = "/home/g0/wiki-sources";
+
+export function isValidWikiSourceRoot(value: unknown): value is string {
+    return typeof value === "string" && value.trim().length > 0 && isAbsolute(value.trim());
+}
+
+/**
+ * The process-global, user-level Markdown corpus behind ctx_search's `wiki`
+ * source. Every project on this machine searches the same root; only user
+ * config may set `enabled` or redirect `source_root`. The block never stats,
+ * creates, or indexes the directory: errors surface on the first real search.
+ */
+export const WikiConfigSchema = z
+    .object({
+        enabled: z
+            .boolean()
+            .default(false)
+            .describe(
+                "Enable ctx_search's `wiki` source over one user-level global Markdown corpus (default: false). Literal content matches with a relative path and 1-based line; no embeddings, no index writes. Project config cannot enable, disable, or redirect it. Hosts register tools once, so a change needs a restart.",
+            ),
+        source_root: z
+            .string()
+            .trim()
+            .min(1, "source_root must be a non-empty absolute directory path")
+            .default(DEFAULT_WIKI_SOURCE_ROOT)
+            .describe(
+                "Absolute directory of the global Markdown corpus (`*.md` / `*.markdown`). USER-LEVEL ONLY: all projects share this root. The directory is read-only to Magic Context and is only touched on the first enabled wiki search.",
+            ),
+    })
+    .strict()
+    .superRefine((data, ctx) => {
+        if (!isValidWikiSourceRoot(data.source_root)) {
+            // Block-level issue: the loaders' field recovery then drops the whole
+            // `wiki` block back to its disabled default instead of keeping
+            // `enabled: true` with a silently substituted root.
+            ctx.addIssue({
+                code: "custom",
+                path: [],
+                message:
+                    "wiki.source_root must be an absolute directory path; the whole wiki block was reset",
+            });
+        }
+    });
+
+export type WikiConfig = z.infer<typeof WikiConfigSchema>;
+
 export interface SubcConfig {
     connection_file: string;
 }
@@ -1234,6 +1282,15 @@ export interface MagicContextConfig {
             transient_budget_tokens: number;
             timeout_ms: number;
         };
+    };
+    /**
+     * User-level global Markdown corpus for ctx_search's `wiki` source. Every
+     * project shares one root; project config cannot change this block.
+     */
+    wiki: {
+        enabled: boolean;
+        /** Absolute directory; the corpus itself is read-only to Magic Context. */
+        source_root: string;
     };
 }
 
@@ -1782,14 +1839,27 @@ export const MagicContextConfigSchema = z
                             .describe(
                                 "User-level project identity this cache may answer. Must equal the identity classic ctx_search resolves for the call directory. Not a directory path. Project values are ignored. Missing, mismatched, or unresolvable identity disables the cache path.",
                             ),
-                        targets: z.array(z.strictObject({
-                            project: z.string(),
-                            slot_file: z.string(),
-                            prefix_path: z.string(),
-                        })).optional().describe("User-level additional project cache targets; connection settings are shared."),
-                        context_docs_budget_tokens: z.number().int().min(1).max(32768).default(4000).describe(
-                            "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). The docs corpus is the single fixed file `.cortexkit/context.md` at the project's git root; symlinks are rejected and there is no path list. Project values are ignored.",
-                        ),
+                        targets: z
+                            .array(
+                                z.strictObject({
+                                    project: z.string(),
+                                    slot_file: z.string(),
+                                    prefix_path: z.string(),
+                                }),
+                            )
+                            .optional()
+                            .describe(
+                                "User-level additional project cache targets; connection settings are shared.",
+                            ),
+                        context_docs_budget_tokens: z
+                            .number()
+                            .int()
+                            .min(1)
+                            .max(32768)
+                            .default(4000)
+                            .describe(
+                                "User-level token budget for the reference docs section, shared across all slots (min: 1, max: 32768, default: 4000). The docs corpus is the single fixed file `.cortexkit/context.md` at the project's git root; symlinks are rejected and there is no path list. Project values are ignored.",
+                            ),
                         max_tokens: z
                             .number()
                             .min(1)
@@ -1816,9 +1886,15 @@ export const MagicContextConfigSchema = z
                                 "User-level deadline in milliseconds for the one composite query request and for each write-side HTTP call (min: 1, max: 600000, default: 60000). Also cancelled by the caller abort signal. Project values are ignored.",
                             ),
                     })
-                    .default({ enabled: false, context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 })
+                    .default({
+                        enabled: false,
+                        context_docs_budget_tokens: 4000,
+                        max_tokens: 2048,
+                        transient_budget_tokens: 2000,
+                        timeout_ms: 60000,
+                    })
                     .describe(
-                        "Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory's project identity matches the primary project or an additional target; a project may set only enabled. A query is one composite POST /v1/chat/completions that carries only the new user turn plus strata_session restore and splice: the server restores the slot, splices the base from its token sidecar and answers inside one serialized turn, so timeout_ms bounds that single request and the client never replays prefix.json. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:[\"memory\"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. A splice the sidecar cannot serve (splice_stale, splice_base_seam, splice_render_mismatch) is answered through the older restore-then-replay flow, byte-identically, and leaves a rebuild marker beside prefix_path for the write side. Not sampled by live reload.",
+                        'Bare ctx_search queries may be answered from a Strata session-file cache when enabled, the user-level connection is complete, and the call directory\'s project identity matches the primary project or an additional target; a project may set only enabled. A query is one composite POST /v1/chat/completions that carries only the new user turn plus strata_session restore and splice: the server restores the slot, splices the base from its token sidecar and answers inside one serialized turn, so timeout_ms bounds that single request and the client never replays prefix.json. For bare queries, non-memory classic retrieval runs first and its summaries are fused into the slot query, so a slot miss returns those classic results; for sources:["memory"] queries a slot miss is terminal (记忆库中无, no classic run), while transport errors and identity mismatches fall back to classic retrieval. A splice the sidecar cannot serve (splice_stale, splice_base_seam, splice_render_mismatch) is answered through the older restore-then-replay flow, byte-identically, and leaves a rebuild marker beside prefix_path for the write side. Not sampled by live reload.',
                     ),
             })
             .default({
@@ -1829,11 +1905,23 @@ export const MagicContextConfigSchema = z
                 auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
                 subagent_inject: { enabled: true },
-                strata_ask: { enabled: false, context_docs_budget_tokens: 4000, max_tokens: 2048, transient_budget_tokens: 2000, timeout_ms: 60000 },
+                strata_ask: {
+                    enabled: false,
+                    context_docs_budget_tokens: 4000,
+                    max_tokens: 2048,
+                    transient_budget_tokens: 2000,
+                    timeout_ms: 60000,
+                },
             })
             .describe(
                 "Cross-session memory configuration. auto_search and git_commit_indexing sit here for history but work with memory.enabled false.",
             ),
+        wiki: WikiConfigSchema.default({
+            enabled: false,
+            source_root: DEFAULT_WIKI_SOURCE_ROOT,
+        }).describe(
+            "User-level global Markdown corpus for ctx_search's `wiki` source. Every project shares this root; project config cannot enable, disable, or redirect it. Default disabled. Hosts register tools once, so a change needs a restart.",
+        ),
     })
     .transform((data): MagicContextConfig => {
         return {

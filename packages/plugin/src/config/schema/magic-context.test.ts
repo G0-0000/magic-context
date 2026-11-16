@@ -3,6 +3,7 @@ import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
     DEFAULT_LOCAL_EMBEDDING_MODEL,
+    DEFAULT_WIKI_SOURCE_ROOT,
     type MagicContextConfig,
     MagicContextConfigSchema,
     PER_HARNESS_MIGRATION_INVENTORY,
@@ -104,6 +105,52 @@ describe("MagicContextConfigSchema", () => {
         });
     });
 
+    describe("wiki source config", () => {
+        it("defaults disabled at the shared /home/g0/wiki-sources root", () => {
+            for (const input of [{}, { wiki: {} }, { wiki: { enabled: false } }]) {
+                expect(MagicContextConfigSchema.parse(input).wiki).toEqual({
+                    enabled: false,
+                    source_root: DEFAULT_WIKI_SOURCE_ROOT,
+                });
+            }
+            expect(DEFAULT_WIKI_SOURCE_ROOT).toBe("/home/g0/wiki-sources");
+        });
+
+        it("accepts an enabled absolute corpus root", () => {
+            const source_root = "/tmp/global-wiki";
+            expect(
+                MagicContextConfigSchema.parse({ wiki: { enabled: true, source_root } }).wiki,
+            ).toEqual({ enabled: true, source_root });
+        });
+
+        it("rejects a relative, empty, or blank root at the whole block", () => {
+            // Block-level issue (path ["wiki"]): the loaders' field recovery then
+            // replaces the whole block with the disabled default instead of keeping
+            // `enabled: true` over a silently substituted root.
+            for (const source_root of ["relative/root", "", "   "]) {
+                const failure = MagicContextConfigSchema.safeParse({
+                    wiki: { enabled: true, source_root },
+                });
+                expect(failure.success).toBe(false);
+                if (failure.success) continue;
+                expect(failure.error.issues.every((issue) => issue.path[0] === "wiki")).toBe(true);
+            }
+            const relative = MagicContextConfigSchema.safeParse({
+                wiki: { enabled: true, source_root: "relative/root" },
+            });
+            expect(relative.success).toBe(false);
+            if (relative.success) return;
+            expect(relative.error.issues[0]?.path).toEqual(["wiki"]);
+            expect(relative.error.issues[0]?.message).toContain("absolute");
+        });
+
+        it("rejects unknown wiki fields", () => {
+            expect(
+                MagicContextConfigSchema.safeParse({ wiki: { index_path: ["/tmp/docs"] } }).success,
+            ).toBe(false);
+        });
+    });
+
     describe("valid config", () => {
         it("parses an enabled config without stale reduction-specific keys", () => {
             const input = {
@@ -194,7 +241,11 @@ describe("MagicContextConfigSchema", () => {
 
             const result = MagicContextConfigSchema.parse(input);
 
-            expect(result).toEqual({ ...input, protected_tools: { todowrite: 1, ctx_reduce: 3 } });
+            expect(result).toEqual({
+                ...input,
+                wiki: { enabled: false, source_root: DEFAULT_WIKI_SOURCE_ROOT },
+                protected_tools: { todowrite: 1, ctx_reduce: 3 },
+            });
         });
 
         it("defaults memory.subagent_inject to enabled and accepts opt-out", () => {

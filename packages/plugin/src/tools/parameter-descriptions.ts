@@ -38,7 +38,8 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
     ctx_search: {
         query: "A natural-language question carrying the exact terms you expect in the answer.",
         limit: "Maximum results (default 10).",
-        sources: "Restrict to these sources; omitting it or passing [] searches every source.",
+        sources:
+            "Restrict to these sources; omitting it or passing [] searches every enabled source.",
         from: "Earliest date, YYYY-MM-DD (inclusive).",
         to: "Latest date, YYYY-MM-DD (inclusive; default open).",
     },
@@ -78,7 +79,7 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
     ctx_search: {
         query: "A natural-language question carrying the exact terms you expect in the answer.",
         limit: "Maximum results (default 10).",
-        sources: "Restrict to these sources; omit or [] for all.",
+        sources: "Restrict to these sources; omit or [] for all enabled.",
         from: "Earliest date, YYYY-MM-DD (inclusive).",
         to: "Latest date, YYYY-MM-DD (inclusive; default open).",
     },

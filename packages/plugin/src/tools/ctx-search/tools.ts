@@ -12,10 +12,11 @@ import {
 import {
     createUnifiedSearchDiagnostics,
     formatSearchResults,
+    formatWikiSearchDiagnostics,
     parseIdShapedQuery,
+    type ReservedSearchCandidates,
     resolveMemoriesByIdsForSearch,
     unifiedSearch,
-    type ReservedSearchCandidates,
 } from "../../features/magic-context/search";
 import { searchMessageHistoryOffThread } from "../../hooks/magic-context/auto-search-worker-client";
 import { getVisibleMemoryIds } from "../../hooks/magic-context/inject-compartments";
@@ -40,8 +41,8 @@ import {
 import {
     buildReservedHits,
     buildTransientMaterial,
-    withReservedAppendix,
     type TransientMaterial,
+    withReservedAppendix,
 } from "./transient-material";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
@@ -89,9 +90,11 @@ const ctxSearchArgsShape = {
         .optional()
         .describe("Latest date, YYYY-MM-DD (inclusive; default open)."),
     sources: tool.schema
-        .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note"]))
+        .array(tool.schema.enum(["memory", "message", "git_commit", "primer", "note", "wiki"]))
         .optional()
-        .describe("Restrict to these sources; omitting it or passing [] searches every source."),
+        .describe(
+            "Restrict to these sources; omitting it or passing [] searches every enabled source.",
+        ),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
@@ -113,11 +116,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 sources: {
                     type: "array",
                     items: "string",
-                    maxItems: 5,
-                    values: ["memory", "message", "git_commit", "primer", "note"],
+                    maxItems: 6,
+                    values: ["memory", "message", "git_commit", "primer", "note", "wiki"],
                 },
             });
-            const query = args.query?.trim();
+            const rawQuery = args.query ?? "";
+            const query = rawQuery.trim();
             if (!query) {
                 return "Error: 'query' is required.";
             }
@@ -140,7 +144,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             };
 
             const runClassic = async (
-                overrides?: { sources?: CtxSearchSource[] },
+                overrides?: {
+                    sources?: CtxSearchSource[];
+                    wikiFallback?: boolean;
+                    /** Memory gates wiki but stays out of the non-memory fusion fallback text. */
+                    memoryGateOnly?: boolean;
+                },
                 collectReserved?: (candidates: ReservedSearchCandidates) => void,
             ) => {
                 // Only search message history up to the last compartment boundary —
@@ -189,7 +198,11 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                 // ID-shaped short-circuit: look up a whole query of memory IDs
                 // directly. Unresolved IDs still fall through to normal text search.
                 const idShape = parseIdShapedQuery(query);
-                if (idShape && memoryEnabled) {
+                const normalizedSources = normalizeSources(args.sources);
+                const selectedSources = new Set(normalizedSources ?? []);
+                const memorySourceSelected =
+                    normalizedSources === undefined || selectedSources.has("memory");
+                if (idShape && memoryEnabled && memorySourceSelected) {
                     const idResults = resolveMemoriesByIdsForSearch({
                         db: deps.db,
                         projectPath,
@@ -215,6 +228,42 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     }
                 }
 
+                const wikiFallback = overrides?.wikiFallback ?? normalizedSources === undefined;
+                let currentQueryMessageIds: string[] | undefined;
+                if (wikiFallback && deps.readMessages) {
+                    try {
+                        const rawMessages = deps.readMessages(toolContext.sessionID);
+                        let currentRealUserIndex = -1;
+                        for (let index = rawMessages.length - 1; index >= 0; index--) {
+                            const message = rawMessages[index]!;
+                            if (
+                                message.role === "user" &&
+                                (message.storeType === undefined || message.storeType === "user")
+                            ) {
+                                currentRealUserIndex = index;
+                                break;
+                            }
+                        }
+                        if (currentRealUserIndex >= 0) {
+                            currentQueryMessageIds = [rawMessages[currentRealUserIndex]!.id];
+                            const currentAssistantId = toolContext.messageID;
+                            if (
+                                typeof currentAssistantId === "string" &&
+                                rawMessages
+                                    .slice(currentRealUserIndex + 1)
+                                    .some(
+                                        (message) =>
+                                            message.role === "assistant" &&
+                                            message.id === currentAssistantId,
+                                    )
+                            ) {
+                                currentQueryMessageIds.push(currentAssistantId);
+                            }
+                        }
+                    } catch {
+                        // No confirmed host ids: retain all internal evidence.
+                    }
+                }
                 let rerankSkipped = "";
                 const results = await unifiedSearch(
                     deps.db,
@@ -225,17 +274,27 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         limit: normalizeLimit(args.limit),
                         memoryEnabled,
                         embeddingEnabled,
+                        wiki: deps.wiki,
+                        wikiQuery: rawQuery,
                         embedQuery: (text, signal) =>
                             withQueryEmbeddingDeadline(
                                 (embeddingSignal) =>
-                                    embedTextForProject(projectPath, text, embeddingSignal, "query"),
+                                    embedTextForProject(
+                                        projectPath,
+                                        text,
+                                        embeddingSignal,
+                                        "query",
+                                    ),
                                 signal,
                             ),
                         isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
                         readMessages: deps.readMessages,
                         maxMessageOrdinal: messageOrdinalCutoff,
+                        currentQueryMessageIds,
                         gitCommitsEnabled,
-                        sources: overrides?.sources ?? normalizeSources(args.sources),
+                        sources: overrides?.sources ?? normalizedSources,
+                        wikiFallback,
+                        memoryGateOnly: overrides?.memoryGateOnly === true,
                         visibleMemoryIds,
                         diagnostics,
                         gitRepositoryAvailable:
@@ -261,11 +320,24 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                         ...dateRange,
                     },
                 );
+                const textResults = overrides?.memoryGateOnly
+                    ? results.filter((result) => result.source !== "memory")
+                    : results;
+                const textDiagnostics = overrides?.memoryGateOnly
+                    ? {
+                          ...diagnostics,
+                          suppressedVisibleMemoryIds: [],
+                      }
+                    : diagnostics;
                 return {
                     ok: true as const,
                     text:
-                        formatSearchResults(query, results, toolContext.sessionID, diagnostics) +
-                        (rerankSkipped ? `\n${rerankSkipped}` : ""),
+                        formatSearchResults(
+                            query,
+                            textResults,
+                            toolContext.sessionID,
+                            textDiagnostics,
+                        ) + (rerankSkipped ? `\n${rerankSkipped}` : ""),
                     results,
                     diagnostics,
                 };
@@ -312,22 +384,37 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             }
                             return (await runClassic({ sources: ["memory"] })).text;
                         }
-                        // Fusion searches non-memory sources once, for the
-                        // transient materials; a miss, or a failure with the
+                        // Explicit fusion searches its selected non-memory sources once.
+                        // A default query also searches memory as the internal wiki
+                        // gate; memory is removed before result ranking/limit and material.
+                        // A miss, or a failure with the
                         // status document itself readable, returns that exact
                         // result rather than searching again. A status the
                         // cache cannot carry at all (unreadable ledger, failed
                         // memory lookup, rows over the cap) is different: the
-                        // pre-run never searched memories, and without the
-                        // ledger's changes it is not authoritative — the query
-                        // falls back to the FULL classic search, memories
-                        // included.
+                        // pre-run is not the full classic answer, and without
+                        // the ledger's changes it is not authoritative — the query
+                        // falls back to FULL classic retrieval.
                         let reservedCandidates: ReservedSearchCandidates | undefined;
+                        // The global wiki corpus joins the default pre-run only when
+                        // user-level config enables it. Explicit source arrays retain
+                        // their existing non-memory filtering and direct wiki routing.
+                        const defaultFusionSources: CtxSearchSource[] = [
+                            "memory",
+                            "git_commit",
+                            "primer",
+                            "note",
+                            "message",
+                        ];
+                        if (deps.wiki?.enabled) defaultFusionSources.push("wiki");
+                        const wikiFallback = args.sources === undefined;
                         const classic = await runClassic(
                             {
-                                sources: args.sources?.filter((source) => source !== "memory") ?? [
-                                    "git_commit", "primer", "note", "message",
-                                ],
+                                sources:
+                                    args.sources?.filter((source) => source !== "memory") ??
+                                    defaultFusionSources,
+                                wikiFallback,
+                                memoryGateOnly: args.sources === undefined,
                             },
                             (candidates) => {
                                 reservedCandidates = candidates;
@@ -342,6 +429,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                                 query,
                                 results: classic.results,
                                 budgetTokens: activeConnection.transientBudgetTokens,
+                                prioritizeWikiFallback: wikiFallback,
                                 reservedCandidates,
                             });
                         } catch (error) {
@@ -377,7 +465,18 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             const base = args.sources
                                 ? mixedSourcesAnswer(answer.text)
                                 : answer.text;
-                            return withReservedAppendix(base, reserved, query);
+                            const wikiDiagnostics = formatWikiSearchDiagnostics(
+                                classic.diagnostics,
+                            );
+                            const answerWithDiagnostics = wikiDiagnostics
+                                ? `${base}\n\n${wikiDiagnostics}`
+                                : base;
+                            return withReservedAppendix(
+                                answerWithDiagnostics,
+                                reserved,
+                                query,
+                                material?.wikiSections ?? [],
+                            );
                         }
                         if (
                             answer.status === "failed" &&
@@ -386,7 +485,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                             return (await runClassic()).text;
                         }
                         if (answer.status === "miss") {
-                            return withReservedAppendix(classic.text, reserved, query);
+                            return withReservedAppendix(
+                                classic.text,
+                                reserved,
+                                query,
+                                material?.wikiSections ?? [],
+                            );
                         }
                         return classic.text;
                     }

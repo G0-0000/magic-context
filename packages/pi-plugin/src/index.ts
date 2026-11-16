@@ -29,7 +29,6 @@ import {
 	isDreamerRunnable,
 } from "@magic-context/core/config/agent-disable";
 import { logConfigDependencyNotesOnce } from "@magic-context/core/config/dependency-notes";
-import { recordMemoryChange } from "@magic-context/core/tools/ctx-search/strata-cache";
 import {
 	changedLiveKeys,
 	dreamerRunConfig,
@@ -134,6 +133,7 @@ import {
 } from "@magic-context/core/shared/provider-response-completion";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import { registerStandalonePluginMarker } from "@magic-context/core/standalone-plugin-marker";
+import { recordMemoryChange } from "@magic-context/core/tools/ctx-search/strata-cache";
 
 import { startHostStallProfilerSwitch } from "../../plugin/src/shared/host-stall-profiler";
 import packageMetadata from "../package.json";
@@ -1998,7 +1998,11 @@ async function startPiMagicContextRuntime(
 		// Call cwd, not the boot project. Re-read every search; a file edit is
 		// visible on the next call. Parse/schema failure disables the cache path.
 		resolveStrataAsk: (ctx) => resolvePiStrataAsk(ctx.cwd),
-		onMemoryChanged: (event, projectDir) => recordMemoryChange(projectDir, event),
+		// One user-level global corpus, resolved at boot like every other
+		// registration-time surface. Project config never carries a wiki block.
+		wiki: config.wiki,
+		onMemoryChanged: (event, projectDir) =>
+			recordMemoryChange(projectDir, event),
 		expandTools: config.historian?.expand_tools,
 		db,
 		ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,

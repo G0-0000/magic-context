@@ -69,4 +69,18 @@ describe("Pi project config security", () => {
 		expect(raw.dreamer).toEqual({ model: "x" });
 		expect(warnings.join("\n")).toContain("embedding.dimensions");
 	});
+
+	it("strips the whole wiki block from project config (one process-global root)", () => {
+		const raw: Record<string, unknown> = {
+			wiki: { enabled: true, source_root: "/repo-controlled" },
+			dreamer: { model: "x" },
+		};
+		const warnings = stripUnsafeProjectConfigFields(raw);
+
+		// Block-scoped: a repo may neither enable the global corpus nor redirect
+		// it, so no leaf of the block survives and the user's value stays authoritative.
+		expect("wiki" in raw).toBe(false);
+		expect(raw.dreamer).toEqual({ model: "x" });
+		expect(warnings.join("\n")).toContain("Ignoring wiki");
+	});
 });

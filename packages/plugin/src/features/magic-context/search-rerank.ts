@@ -50,7 +50,8 @@ export type SearchLanes = Record<
     | "chunk_vector"
     | "git_fts"
     | "git_vector"
-    | "notes",
+    | "notes"
+    | "wiki",
     UnifiedSearchResult[]
 >;
 export function emptySearchLanes(): SearchLanes {
@@ -64,6 +65,7 @@ export function emptySearchLanes(): SearchLanes {
         git_fts: [],
         git_vector: [],
         notes: [],
+        wiki: [],
     };
 }
 export function searchResultKey(hit: UnifiedSearchResult): string {
@@ -82,6 +84,10 @@ export function searchResultKey(hit: UnifiedSearchResult): string {
             return `git_commit:${hit.sha}`;
         case "note":
             return `note:${hit.noteId}`;
+        case "wiki":
+            // Corpus paths are relative to the global root; the line makes two
+            // matches in one file two distinct hits.
+            return `wiki:${hit.path}:${hit.line}`;
     }
 }
 
@@ -127,6 +133,105 @@ export function truncateUtf8(text: string, bytes: number): string {
 export function candidateText(location: string, title: string, body: string): string {
     const header = `${truncateUtf8(location.replaceAll("\n", " "), 200)}\n${truncateUtf8(title.replaceAll("\n", " "), 120)}\n`;
     return header + truncateUtf8(body, DOCUMENT_BYTES - Buffer.byteLength(header));
+}
+
+function truncateWikiPreview(preview: string, bytes: number): string {
+    if (Buffer.byteLength(preview, "utf8") <= bytes) return preview;
+    if (!preview.startsWith("…")) return truncateUtf8(preview, bytes);
+    const points = Array.from(preview);
+    for (let length = points.length; length > 0; length--) {
+        const start = Math.floor((points.length - length) / 2);
+        const end = start + length;
+        const candidate = `${start > 0 ? "…" : ""}${points.slice(start, end).join("")}${end < points.length ? "…" : ""}`;
+        if (Buffer.byteLength(candidate, "utf8") <= bytes) return candidate;
+    }
+    return "";
+}
+
+function wikiQueryRange(text: string, query: string): [number, number] | null {
+    if (!query) return null;
+    const caseSensitive = query.toLowerCase() !== query;
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const matcher = new RegExp(escaped, caseSensitive ? "gu" : "giu");
+    const midpoint = Array.from(text).length / 2;
+    let nearest: [number, number] | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const match of text.matchAll(matcher)) {
+        if (match.index === undefined || !match[0]) continue;
+        const start = Array.from(text.slice(0, match.index)).length;
+        const end = start + Array.from(match[0]).length;
+        const distance = Math.abs((start + end) / 2 - midpoint);
+        if (distance < nearestDistance) {
+            nearest = [start, end];
+            nearestDistance = distance;
+        }
+    }
+    return nearest;
+}
+
+function wikiSnippetForRerank(snippet: string, query: string | undefined, bytes: number): string {
+    if (!query || Buffer.byteLength(snippet, "utf8") <= bytes) {
+        return truncateWikiPreview(snippet, bytes);
+    }
+    const points = Array.from(snippet);
+    const range = wikiQueryRange(snippet, query);
+    if (!range) return truncateWikiPreview(snippet, bytes);
+    const [start, end] = range;
+    const anchor = points.slice(start, end).join("");
+    const anchorBytes = Buffer.byteLength(anchor, "utf8");
+    if (anchorBytes > bytes) return truncateUtf8(anchor, bytes);
+
+    const before = points.slice(0, start);
+    const after = points.slice(end);
+    let beforeMarker = before.length > 0;
+    let afterMarker = after.length > 0;
+    let remaining = bytes - anchorBytes;
+    const markerBytes = Buffer.byteLength("…", "utf8");
+    const markerReserve =
+        Number(beforeMarker) * markerBytes + Number(afterMarker) * markerBytes;
+    if (remaining < markerReserve) return anchor;
+    remaining -= markerReserve;
+
+    let beforeTaken = 0;
+    let afterTaken = 0;
+    let preferBefore = true;
+    const takeBefore = (): boolean => {
+        const point = before[before.length - beforeTaken - 1];
+        if (point === undefined) return false;
+        const pointBytes = Buffer.byteLength(point, "utf8");
+        if (pointBytes > remaining) return false;
+        beforeTaken++;
+        remaining -= pointBytes;
+        if (beforeTaken === before.length && beforeMarker) {
+            remaining += markerBytes;
+            beforeMarker = false;
+        }
+        return true;
+    };
+    const takeAfter = (): boolean => {
+        const point = after[afterTaken];
+        if (point === undefined) return false;
+        const pointBytes = Buffer.byteLength(point, "utf8");
+        if (pointBytes > remaining) return false;
+        afterTaken++;
+        remaining -= pointBytes;
+        if (afterTaken === after.length && afterMarker) {
+            remaining += markerBytes;
+            afterMarker = false;
+        }
+        return true;
+    };
+
+    while (true) {
+        const first = preferBefore ? takeBefore : takeAfter;
+        const second = preferBefore ? takeAfter : takeBefore;
+        if (!first() && !second()) break;
+        preferBefore = !preferBefore;
+    }
+
+    const beforeText = before.slice(before.length - beforeTaken).join("");
+    const afterText = after.slice(0, afterTaken).join("");
+    return `${beforeMarker ? "…" : ""}${beforeText}${anchor}${afterText}${afterMarker ? "…" : ""}`;
 }
 
 export interface PinnedReranker {
@@ -464,6 +569,7 @@ export function candidateTexts(
     sessionId: string,
     projectPath: string,
     pool: UnifiedSearchResult[],
+    query?: string,
 ): string[] {
     return pool.map((hit) => {
         const id = searchResultKey(hit).split(":").slice(1).join(":");
@@ -538,6 +644,19 @@ export function candidateTexts(
                         hit.endOrdinal,
                     ) ?? "";
                 break;
+            }
+            case "wiki": {
+                // Anchor the native matched query in the full snippet, then use
+                // the remaining byte budget for adjacent context.
+                location = `wiki ${hit.path}:${hit.line}`;
+                const wikiLocation = truncateUtf8(location.replaceAll("\n", " "), 200);
+                const wikiTitle = "wiki match";
+                const header = `${wikiLocation}\n${wikiTitle}\n`;
+                return `${header}${wikiSnippetForRerank(
+                    hit.snippet,
+                    query,
+                    DOCUMENT_BYTES - Buffer.byteLength(header),
+                )}`;
             }
         }
         return candidateText(location, title, body);

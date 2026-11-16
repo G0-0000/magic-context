@@ -143,6 +143,7 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   "memory.strata_ask":
     "user-level Strata session-file cache for bare ctx_search, bound to memory.strata_ask.project; a project may set only enabled; raw JSONC until a dedicated user-tier form exists",
   subc: "user-only subc daemon routing; raw JSONC because project configs cannot provide this connection",
+  wiki: "user-level global Markdown corpus for ctx_search's `wiki` source, shared by every project; raw JSONC until a dedicated user-tier form exists",
   shadow_embedding: "developer-only shadow embedding lane; raw JSONC and never a dashboard knob",
   transform_mode:
     "experimental project-wide Rust runtime cutover; requires user-level subc configuration and is not exposed in the dashboard yet",
