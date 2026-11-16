@@ -27,7 +27,11 @@ import { applyJsonSchemaParameterDescriptions } from "@magic-context/core/tools/
 import { restoreOmpMentions } from "../omp-mentions";
 import { resolvePiHarnessKind } from "../pi-harness-kind";
 import { createCtxExpandTool } from "./ctx-expand";
-import { createCtxMemoryListTool, createCtxMemoryTool, type CtxMemoryToolDeps } from "./ctx-memory";
+import {
+	type CtxMemoryToolDeps,
+	createCtxMemoryListTool,
+	createCtxMemoryTool,
+} from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxReduceTool } from "./ctx-reduce";
 import { createCtxSearchTool } from "./ctx-search";
@@ -79,10 +83,14 @@ export interface RegisterToolsOptions {
 	gitCommitsEnabled?: boolean;
 	rerankConnectionFile?: string;
 	rerankConfig?: import("@magic-context/core/config/schema/magic-context").RerankConfig;
+	/** User-level global wiki corpus for ctx_search's `wiki` source. Omitted keeps it off. */
+	wiki?: import("@magic-context/core/config/schema/magic-context").WikiConfig;
 	/** Trust-filtered strata connection for the call cwd. Null disables the cache path. */
-	resolveStrataAsk?: (
-		ctx: { cwd: string },
-	) => import("@magic-context/core/tools/ctx-search/strata-ask").StrataAskConnection | null;
+	resolveStrataAsk?: (ctx: {
+		cwd: string;
+	}) =>
+		| import("@magic-context/core/tools/ctx-search/strata-ask").StrataAskConnection
+		| null;
 	/** Resolve the current directory's project identity using the user-level home-project setting. */
 	resolveProjectIdentity?: (ctx: { cwd: string }) => string | undefined;
 	/** When true, register the separate ctx_memory_list tool and enable Curate-only
@@ -199,6 +207,7 @@ export function registerMagicContextTools(
 				gitCommitsEnabled: opts.gitCommitsEnabled,
 				rerankConnectionFile: opts.rerankConnectionFile,
 				rerankConfig: opts.rerankConfig,
+				wiki: opts.wiki,
 				resolveProjectIdentity,
 				resolveStrataAsk,
 			}),

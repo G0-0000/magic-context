@@ -2947,6 +2947,28 @@
         }
       }
     },
+    "wiki": {
+      "default": {
+        "enabled": false,
+        "source_root": "/home/g0/wiki-sources"
+      },
+      "description": "User-level global Markdown corpus for ctx_search's `wiki` source. Every project shares this root; project config cannot enable, disable, or redirect it. Default disabled. Hosts register tools once, so a change needs a restart.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable ctx_search's `wiki` source over one user-level global Markdown corpus (default: false). Literal content matches with a relative path and 1-based line; no embeddings, no index writes. Project config cannot enable, disable, or redirect it. Hosts register tools once, so a change needs a restart.",
+          "type": "boolean"
+        },
+        "source_root": {
+          "default": "/home/g0/wiki-sources",
+          "description": "Absolute directory of the global Markdown corpus (`*.md` / `*.markdown`). USER-LEVEL ONLY: all projects share this root. The directory is read-only to Magic Context and is only touched on the first enabled wiki search.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "$schema": {
       "type": "string",
       "description": "JSON Schema reference for editor validation and autocomplete."

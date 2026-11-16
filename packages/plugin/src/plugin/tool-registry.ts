@@ -14,6 +14,7 @@ import {
 } from "../features/magic-context/storage";
 import { getObservedEpochFloor } from "../features/magic-context/storage-meta-persisted";
 import { setCtxReduceRegisteredGlobally } from "../hooks/magic-context/ctx-reduce-availability";
+import { readRawSessionMessages } from "../hooks/magic-context/read-session-chunk";
 import { getErrorMessage } from "../shared/error-message";
 import { log } from "../shared/logger";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
@@ -182,9 +183,13 @@ export function createToolRegistry(args: {
             rerankConfig: pluginConfig.rerank,
             resolveProjectPath,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+            readMessages: readRawSessionMessages,
             // Call directory, not the plugin launch directory. Re-reads the
             // trust-filtered config; a file edit is visible on the next search.
             resolveStrataAsk: resolveOpenCodeStrataAsk,
+            // Registered once per plugin process from the trust-filtered config;
+            // project config never carries a wiki block (user-level only).
+            wiki: pluginConfig.wiki,
         }),
         ...(memoryEnabled
             ? createCtxMemoryTools({

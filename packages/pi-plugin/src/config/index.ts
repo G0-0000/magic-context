@@ -27,6 +27,7 @@ import { pruneNestedConfigLeaf } from "@magic-context/core/config/prune-config-l
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
 import { stripRemovedAgentConfig } from "@magic-context/core/config/removed-agent-config";
 import {
+	isValidWikiSourceRoot,
 	type MagicContextConfig,
 	MagicContextConfigSchema,
 	PROTECTED_TOKENS_MIN,
@@ -369,9 +370,24 @@ function parsePiConfig(
 
 	const patched: Record<string, unknown> = { ...migrated };
 	const warnings: string[] = [...preMigrationWarnings];
+	const rawWiki = migrated.wiki;
+	const invalidWikiSourceRoot =
+		typeof rawWiki === "object" &&
+		rawWiki !== null &&
+		!Array.isArray(rawWiki) &&
+		Object.hasOwn(rawWiki, "source_root") &&
+		!isValidWikiSourceRoot((rawWiki as Record<string, unknown>).source_root);
 
 	for (const key of errorPaths) {
 		recoveredTopLevelKeys.push(key);
+		if (key === "wiki" && invalidWikiSourceRoot) {
+			recoveredFieldPaths.push("wiki");
+			delete patched.wiki;
+			warnings.push(
+				`"wiki": wiki.source_root must be an absolute directory path and non-empty; the whole block was reset to ${JSON.stringify(defaults.wiki)}.`,
+			);
+			continue;
+		}
 		const isAgentConfig = key === "historian" || key === "dreamer";
 
 		// Object-valued key: prune ONLY invalid nested leaves, keep valid siblings

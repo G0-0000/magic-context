@@ -184,6 +184,8 @@ export interface SearchGitCommitsOptions {
     to?: number;
     /** Capture independent lexical/vector rankings without repeating either retrieval pass. */
     captureLanes?: (fts: GitCommitSearchHit[], vector: GitCommitSearchHit[]) => void;
+    /** Internal pre-limit evidence signal for the wiki fallback gate. */
+    captureLexicalEvidence?: (hasLexicalEvidence: boolean) => void;
 }
 
 function clamp01(value: number): number {
@@ -248,6 +250,9 @@ export function searchGitCommitsSync(
     ftsCandidates.forEach((commit, rank) => {
         ftsScores.set(commit.sha, 1 / (rank + 1));
     });
+    // Project/date filtering is complete, but semantic merging and the final
+    // result limit have not run: older lexical evidence must remain visible.
+    options.captureLexicalEvidence?.(ftsScores.size > 0);
 
     // ---- Semantic pass --------------------------------------------------
     const semanticScores = new Map<string, number>();

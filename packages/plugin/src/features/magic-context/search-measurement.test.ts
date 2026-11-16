@@ -108,6 +108,26 @@ describe("recordShadowMeasurement", () => {
         ).resolves.toBeUndefined();
     });
 
+    it("disables wiki fallback and wiki I/O in the shadow rerun", async () => {
+        const db = useTempDb();
+        _setTestProviderFactoryForProject(() => new FakeShadowProvider());
+        registerProjectShadowEmbedding(db, "git:shadow-measure", synapseConfig, "/tmp/shadow");
+        let observed: UnifiedSearchOptions | undefined;
+        await recordShadowMeasurement({
+            ...makeMeasurementArgs(db),
+            options: {
+                wiki: { enabled: true, source_root: "/tmp/wiki-must-not-be-read" },
+                wikiFallback: true,
+            },
+            search: async (_db, _session, _project, _query, options) => {
+                observed = options;
+                return [];
+            },
+        });
+        expect(observed?.wiki).toBeUndefined();
+        expect(observed?.wikiFallback).toBe(false);
+    });
+
     it("never raises an unhandled rejection when floated like the search call site", async () => {
         const db = useTempDb();
         _setTestProviderFactoryForProject(() => new FakeShadowProvider());

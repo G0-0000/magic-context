@@ -39,6 +39,7 @@ import { pruneNestedConfigLeaf } from "./prune-config-leaf";
 import { loadRawConfigFile } from "./raw-loader";
 import { stripRemovedAgentConfig } from "./removed-agent-config";
 import {
+    isValidWikiSourceRoot,
     type MagicContextConfig,
     MagicContextConfigSchema,
     PROTECTED_TOKENS_MIN,
@@ -510,8 +511,23 @@ export function parsePluginConfig(
     }
 
     const patched: Record<string, unknown> = { ...rawConfig };
+    const rawWiki = migrated.wiki;
+    const invalidWikiSourceRoot =
+        typeof rawWiki === "object" &&
+        rawWiki !== null &&
+        !Array.isArray(rawWiki) &&
+        Object.hasOwn(rawWiki, "source_root") &&
+        !isValidWikiSourceRoot((rawWiki as Record<string, unknown>).source_root);
     for (const key of errorPaths) {
         recoveredTopLevelKeys.push(key);
+        if (key === "wiki" && invalidWikiSourceRoot) {
+            recoveredFieldPaths.push("wiki");
+            delete patched.wiki;
+            warnings.push(
+                `"wiki": wiki.source_root must be an absolute directory path and non-empty; the whole block was reset to ${JSON.stringify(defaults.wiki)}.`,
+            );
+            continue;
+        }
         const isAgentConfig = key === "historian" || key === "dreamer";
 
         // For object-valued keys (including agent harness blocks), prune only invalid

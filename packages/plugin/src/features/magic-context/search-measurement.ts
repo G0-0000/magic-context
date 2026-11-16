@@ -23,6 +23,8 @@ function resultId(result: UnifiedSearchResult): string {
             return `primer:${result.primerId}`;
         case "note":
             return `note:${result.noteId}`;
+        case "wiki":
+            return `wiki:${result.path}:${result.line}`;
     }
 }
 
@@ -71,6 +73,9 @@ export async function recordShadowMeasurement(args: {
                         embeddingEnabled: true,
                         embeddingModelIdOverride: shadowCohort.modelId,
                         chunkModelIdOverride: shadowCohort.chunkModelId,
+                        // Telemetry must not repeat wiki scans or section-read I/O.
+                        wiki: undefined,
+                        wikiFallback: false,
                         measurementDisabled: true,
                         countRetrievals: false,
                     },

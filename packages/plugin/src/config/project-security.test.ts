@@ -1,11 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { MagicContextConfigSchema } from "./schema/magic-context";
-
 import {
     constrainProjectThresholdOverrides,
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
 } from "./project-security";
+import { MagicContextConfigSchema } from "./schema/magic-context";
 
 describe("strata reference-docs schema", () => {
     it("defaults the budget at both object boundaries and accepts bare targets", () => {
@@ -22,8 +21,15 @@ describe("strata reference-docs schema", () => {
                 "transient_budget_tokens",
             ]);
         }
-        const target = { project: "git:user", slot_file: "user.bin", prefix_path: "/tmp/user.json" };
-        expect(MagicContextConfigSchema.parse({ memory: { strata_ask: { targets: [target] } } }).memory.strata_ask.targets).toEqual([target]);
+        const target = {
+            project: "git:user",
+            slot_file: "user.bin",
+            prefix_path: "/tmp/user.json",
+        };
+        expect(
+            MagicContextConfigSchema.parse({ memory: { strata_ask: { targets: [target] } } }).memory
+                .strata_ask.targets,
+        ).toEqual([target]);
         // Targets validate unknown fields strictly: a removed knob can never
         // ride back in disguised as a target field.
         expect(
@@ -31,9 +37,19 @@ describe("strata reference-docs schema", () => {
                 memory: { strata_ask: { targets: [{ ...target, unexpected_field: ["doc.md"] }] } },
             }).success,
         ).toBe(false);
-        expect(MagicContextConfigSchema.safeParse({ memory: { strata_ask: { targets: [{ ...target, context_docs_budget_tokens: 100 }] } } }).success).toBe(false);
+        expect(
+            MagicContextConfigSchema.safeParse({
+                memory: {
+                    strata_ask: { targets: [{ ...target, context_docs_budget_tokens: 100 }] },
+                },
+            }).success,
+        ).toBe(false);
         for (const budget of [0, 1.5, 32769]) {
-            expect(MagicContextConfigSchema.safeParse({ memory: { strata_ask: { context_docs_budget_tokens: budget } } }).success).toBe(false);
+            expect(
+                MagicContextConfigSchema.safeParse({
+                    memory: { strata_ask: { context_docs_budget_tokens: budget } },
+                }).success,
+            ).toBe(false);
         }
     });
 });
@@ -95,6 +111,17 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect("allow_home_project" in raw).toBe(false);
         expect(raw.dreamer).toEqual({ model: "x" });
         expect(warnings.some((w) => w.includes("allow_home_project"))).toBe(true);
+    });
+
+    it("strips the whole wiki block from project config (one process-global root)", () => {
+        const raw: Record<string, unknown> = {
+            wiki: { enabled: true, source_root: "/repo-controlled" },
+            dreamer: { model: "x" },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("wiki" in raw).toBe(false);
+        expect(raw.dreamer).toEqual({ model: "x" });
+        expect(warnings.some((w) => w.includes("Ignoring wiki"))).toBe(true);
     });
 
     it("strips output_reserve from project config", () => {

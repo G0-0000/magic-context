@@ -541,3 +541,127 @@ test("candidateTexts validates the fts row's session against a stale rowid map",
     expect(text).toContain("beta body");
     expect(text).not.toContain("alpha body");
 });
+
+function wikiHit(path: string, line: number, snippet = "matched line"): UnifiedSearchResult {
+    return {
+        source: "wiki",
+        content: snippet.split("\n")[0] ?? snippet,
+        snippet,
+        score: 0.9,
+        path,
+        line,
+        modifiedAtMs: 1_700_000_000_000,
+    };
+}
+
+test("wiki hits key by relative path and line, never by session", () => {
+    const first = wikiHit("guides/architecture.md", 12);
+    const sameFileOtherLine = wikiHit("guides/architecture.md", 44);
+    expect(searchResultKey(first)).toBe("wiki:guides/architecture.md:12");
+    expect(searchResultKey(first)).not.toBe(searchResultKey(sameFileOtherLine));
+    // Two lanes reporting the same match fuse into one hit; distinct lines stay apart.
+    const lanes = emptySearchLanes();
+    lanes.wiki = [first, sameFileOtherLine, { ...first, score: 0.4 }];
+    expect(fuseSearchLanes(lanes)).toEqual([first, sameFileOtherLine]);
+});
+
+test("the wiki lane votes in the equal-weight RRF like every other source", () => {
+    const wiki = wikiHit("guides/architecture.md", 12);
+    const lanes = emptySearchLanes();
+    lanes.memory_fts = [hit(1)];
+    lanes.wiki = [wiki];
+    // Both lanes rank their hit first, so both earn the same RRF score: the wiki
+    // lane is genuinely fused, never boosted and never dropped.
+    expect(fuseSearchLanes(lanes)).toEqual([hit(1), wiki]);
+});
+
+test("wiki rerank candidates preserve the hit and adjacent snippet context", () => {
+    // A database without any schema: the wiki branch must not query it.
+    const database = new Database(":memory:");
+    try {
+        const snippet = "before context\nmatched line with the pointer\nafter context";
+        const [text] = candidateTexts(
+            database,
+            "ses-a",
+            "git:test",
+            [
+                {
+                    ...wikiHit("guides/architecture.md", 44, snippet),
+                    content: "matched line with the pointer",
+                },
+            ],
+            "pointer",
+        );
+        expect(text).toContain("wiki guides/architecture.md:44");
+        expect(text).toContain("matched line with the pointer");
+        expect(text).toContain("before context");
+        expect(text).toContain("after context");
+        // The location names the global-corpus identity, never a project path.
+        expect(text).not.toContain("git:test");
+    } finally {
+        database.close();
+    }
+});
+
+test("preserves a trailing wiki hit after multibyte context and a 198-byte location", () => {
+    const database = new Database(":memory:");
+    try {
+        const query = "how a b";
+        const snippet = `${"🙂".repeat(213)}${query}`;
+        const [text] = candidateTexts(
+            database,
+            "ses-a",
+            "git:test",
+            [wikiHit("x".repeat(191), 8, snippet)],
+            query,
+        );
+        expect(text).toContain(query);
+        expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(1024);
+    } finally {
+        database.close();
+    }
+});
+
+test("anchors wiki queries with FFF smart-case and keeps them under a small remaining byte budget", () => {
+    const database = new Database(":memory:");
+    try {
+        const insensitiveQuery = "needle";
+        const insensitiveSnippet = `${"🙂".repeat(213)}NEEDLE`;
+        const [insensitiveText] = candidateTexts(
+            database,
+            "ses-a",
+            "git:test",
+            [wikiHit("x".repeat(191), 8, insensitiveSnippet)],
+            insensitiveQuery,
+        );
+        expect(insensitiveText).toContain("NEEDLE");
+
+        const sensitiveQuery = "Needle";
+        const sensitiveSnippet = `needle${"🙂".repeat(213)}${sensitiveQuery}`;
+        const [sensitiveText] = candidateTexts(
+            database,
+            "ses-a",
+            "git:test",
+            [wikiHit("x".repeat(191), 8, sensitiveSnippet)],
+            sensitiveQuery,
+        );
+        expect(sensitiveText).toContain(sensitiveQuery);
+        expect(sensitiveText).not.toContain(`needle${"🙂".repeat(50)}`);
+        expect(Buffer.byteLength(insensitiveText, "utf8")).toBeLessThanOrEqual(1024);
+        expect(Buffer.byteLength(sensitiveText, "utf8")).toBeLessThanOrEqual(1024);
+
+        const longQuery = "🙂".repeat(190);
+        const limitedSnippet = `${"🙂".repeat(20)}${longQuery}${"🙂".repeat(20)}`;
+        const [limitedText] = candidateTexts(
+            database,
+            "ses-a",
+            "git:test",
+            [wikiHit("x".repeat(191), 8, limitedSnippet)],
+            longQuery,
+        );
+        expect(limitedText).toContain(longQuery);
+        expect(Buffer.byteLength(limitedText, "utf8")).toBeLessThanOrEqual(1024);
+    } finally {
+        database.close();
+    }
+});

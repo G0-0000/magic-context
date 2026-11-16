@@ -9,7 +9,10 @@ import {
 } from "@magic-context/core/config/deprecated-config";
 import { getProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "@magic-context/core/config/removed-agent-config";
-import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
+import {
+	DEFAULT_WIKI_SOURCE_ROOT,
+	MagicContextConfigSchema,
+} from "@magic-context/core/config/schema/magic-context";
 import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic-context/dreamer/task-config";
 import { resolveEpochFloorForPass } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { isConfigLoadUntrusted } from "@magic-context/core/plugin/embedding-bootstrap-helpers";
@@ -1035,5 +1038,87 @@ describe("loadPiConfig — project config cannot reset user settings", () => {
 			expect(embedding.dimensions).toBe(768);
 		}
 		expect(result.warnings.join("\n")).toContain("dimensions");
+	});
+});
+
+// The global wiki corpus is user-level only: every project in one Pi process
+// shares the user's enable flag and root, and a repository cannot redirect,
+// enable or disable it. An invalid user root disables the whole block instead
+// of keeping `enabled: true` over the default root.
+describe("loadPiConfig — global wiki source", () => {
+	it("loads enabled/source_root from user config and ignores every project wiki block", () => {
+		const cwd = makeTempRoot("mc-pi-wiki-cwd-");
+		const home = makeTempRoot("mc-pi-wiki-home-");
+		withHome(home);
+		writeUserConfig(
+			home,
+			JSON.stringify({
+				wiki: { enabled: true, source_root: "/home/g0/wiki-sources" },
+			}),
+		);
+		writeProjectConfig(
+			cwd,
+			JSON.stringify({
+				wiki: { enabled: false, source_root: "/repo-controlled" },
+			}),
+		);
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.wiki).toEqual({
+			enabled: true,
+			source_root: "/home/g0/wiki-sources",
+		});
+		expect(result.warnings.join("\n")).toContain("Ignoring wiki");
+	});
+
+	it("defaults to a disabled corpus at the shared user root", () => {
+		const cwd = makeTempRoot("mc-pi-wiki-default-cwd-");
+		const home = makeTempRoot("mc-pi-wiki-default-home-");
+		withHome(home);
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.wiki).toEqual({
+			enabled: false,
+			source_root: DEFAULT_WIKI_SOURCE_ROOT,
+		});
+	});
+
+	it("resets the whole wiki block when the user root is not absolute", () => {
+		const cwd = makeTempRoot("mc-pi-wiki-invalid-cwd-");
+		const home = makeTempRoot("mc-pi-wiki-invalid-home-");
+		withHome(home);
+		writeUserConfig(
+			home,
+			JSON.stringify({ wiki: { enabled: true, source_root: "relative/root" } }),
+		);
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.wiki).toEqual({
+			enabled: false,
+			source_root: DEFAULT_WIKI_SOURCE_ROOT,
+		});
+	});
+
+	it("resets the whole wiki block for every invalid source_root shape", () => {
+		for (const sourceRoot of [null, 7, [], "", "   ", "relative/root"]) {
+			const cwd = makeTempRoot("mc-pi-wiki-invalid-shape-cwd-");
+			const home = makeTempRoot("mc-pi-wiki-invalid-shape-home-");
+			withHome(home);
+			writeUserConfig(
+				home,
+				JSON.stringify({ wiki: { enabled: true, source_root: sourceRoot } }),
+			);
+
+			const result = loadPiConfig({ cwd });
+
+			expect(result.config.wiki).toEqual({
+				enabled: false,
+				source_root: DEFAULT_WIKI_SOURCE_ROOT,
+			});
+			expect(result.warnings.join("\n")).toContain("wiki.source_root");
+		}
 	});
 });

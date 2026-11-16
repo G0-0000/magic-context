@@ -15,7 +15,7 @@ import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
 import { resolveConfigProfile } from "./profiles";
 import { getProtectedTokensTierOverrides } from "./project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "./removed-agent-config";
-import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "./schema/magic-context";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL, DEFAULT_WIKI_SOURCE_ROOT } from "./schema/magic-context";
 import { RUST_COMPACTION_OFF_WARNING } from "./transform-mode";
 
 /**
@@ -1023,6 +1023,49 @@ describe("loadPluginConfig — user-only settings", () => {
         expect(result.auto_update).toBe(true);
         expect(result.enabled).toBe(false);
         expect(result.configWarnings?.join("\n")).toContain("Ignoring auto_update");
+    });
+
+    it("loads the wiki block from user config", () => {
+        const result = loadWithUserConfig(
+            JSON.stringify({ wiki: { enabled: true, source_root: "/home/g0/wiki-sources" } }),
+        );
+
+        expect(result.wiki).toEqual({ enabled: true, source_root: "/home/g0/wiki-sources" });
+    });
+
+    it("strips the wiki block from project config (process-global user-level root)", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ wiki: { enabled: false } }),
+            JSON.stringify({ wiki: { enabled: true, source_root: "/repo-root" } }),
+        );
+
+        // Both fields are user-owned; the project block never reaches the schema,
+        // so a cloned repository cannot enable or redirect the shared corpus.
+        expect(result.wiki).toEqual({ enabled: false, source_root: DEFAULT_WIKI_SOURCE_ROOT });
+        expect(result.configWarnings?.join("\n")).toContain("Ignoring wiki");
+    });
+
+    it("resets the whole wiki block when the user root is not absolute", () => {
+        const result = loadWithUserConfig(
+            JSON.stringify({ wiki: { enabled: true, source_root: "relative/root" } }),
+        );
+
+        expect(result.wiki).toEqual({ enabled: false, source_root: DEFAULT_WIKI_SOURCE_ROOT });
+        expect(result.configWarnings?.join("\n")).toContain("must be an absolute directory path");
+    });
+
+    it("resets the whole wiki block for every invalid source_root shape", () => {
+        for (const sourceRoot of [null, 7, [], "", "   ", "relative/root"]) {
+            const result = loadWithUserConfig(
+                JSON.stringify({ wiki: { enabled: true, source_root: sourceRoot } }),
+            );
+
+            expect(result.wiki).toEqual({
+                enabled: false,
+                source_root: DEFAULT_WIKI_SOURCE_ROOT,
+            });
+            expect(result.configWarnings?.join("\n")).toContain("wiki.source_root");
+        }
     });
 
     it("keeps historian model selection user-owned when project config tries to override it", () => {

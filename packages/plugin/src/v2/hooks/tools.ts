@@ -4,6 +4,7 @@ import { isCompactionEnabled, isDreamerRunnable } from "../../config/agent-disab
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import { getObservedEpochFloor } from "../../features/magic-context/storage-meta-persisted";
+import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { setCtxReduceRegisteredGlobally } from "../../hooks/magic-context/ctx-reduce-availability";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
@@ -59,6 +60,7 @@ export async function registerTools(
     rustToolBackends?: RustToolBackends,
     isInternalChild?: (sessionId: string) => boolean,
     ensureProjectRegistered = ensureProjectRegisteredFromOpenCodeDirectory,
+    readMessages?: (sessionID: string) => RawMessage[],
 ) {
     const compaction = isCompactionEnabled(config);
     setCtxReduceRegisteredGlobally(compaction);
@@ -67,6 +69,7 @@ export async function registerTools(
         resolveProjectPath: (directory: string) =>
             resolveProjectIdentityForSession(directory, config.allow_home_project),
         ensureProjectRegistered,
+        readMessages,
     };
     const definitions = {
         ...(compaction
@@ -104,6 +107,9 @@ export async function registerTools(
             // session workspace and is read at execute time, then resolved
             // through the same trust-filtered loader as OpenCode 1.
             resolveStrataAsk: resolveOpenCodeStrataAsk,
+            // User-level only; v2 rewrites draft.tools per request but the
+            // corpus root never varies per project.
+            wiki: config.wiki,
         }),
         ...(config.memory.enabled
             ? {
@@ -126,13 +132,16 @@ export async function registerTools(
                 description: definition.description,
                 input: tool.schema.toJSONSchema(tool.schema.object(definition.args)),
                 options: { codemode: false },
-                async execute(input, call: {
-                    sessionID: string;
-                    messageID: string;
-                    agent: string;
-                    signal?: AbortSignal;
-                    progress(value: Record<string, unknown>): Promise<void>;
-                }) {
+                async execute(
+                    input,
+                    call: {
+                        sessionID: string;
+                        messageID: string;
+                        agent: string;
+                        signal?: AbortSignal;
+                        progress(value: Record<string, unknown>): Promise<void>;
+                    },
+                ) {
                     // A stale or invented call must not bypass request-local hiding,
                     // reach a module backend, or acquire a write transaction.
                     const refusal = subagentToolRefusal(db, name, call.sessionID, isInternalChild);

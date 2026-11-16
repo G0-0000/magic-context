@@ -143,10 +143,14 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 			registerMagicContextTools(pi, {
 				rerankConnectionFile: cfg.subc?.connection_file,
 				rerankConfig: cfg.rerank,
+				// Children see the same user-level global corpus as the parent;
+				// project config never carries a wiki block.
+				wiki: cfg.wiki,
 				// Lean children have no resolveCurrentProjectDeps cache. Re-read the
 				// call cwd; a parse/schema failure disables the cache path.
 				resolveStrataAsk: (ctx) => resolvePiStrataAsk(ctx.cwd),
-				onMemoryChanged: (event, projectDir) => recordMemoryChange(projectDir, event),
+				onMemoryChanged: (event, projectDir) =>
+					recordMemoryChange(projectDir, event),
 				db,
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				resolveProjectIdentity: (ctx) =>

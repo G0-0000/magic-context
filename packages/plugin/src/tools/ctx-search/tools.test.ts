@@ -17,6 +17,8 @@ import * as searchModule from "../../features/magic-context/search";
 import { MAX_UNIFIED_SEARCH_LIMIT } from "../../features/magic-context/search";
 import { getOrCreateSessionMeta, queueMemoryMutation } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { addNote } from "../../features/magic-context/storage-notes";
+import * as wikiSearchModule from "../../features/magic-context/wiki-search";
 import {
     injectM0M1,
     materializeM0,
@@ -31,8 +33,8 @@ import { statusChangesPathFor } from "./flow-render";
 import { resolveOpenCodeStrataAsk, STRATA_ASK_FOOTER, STRATA_ASK_T4 } from "./strata-ask";
 import { createCtxSearchTools } from "./tools";
 
-const toolContext = (sessionID = "ses-search", directory?: string) =>
-    ({ sessionID, directory }) as never;
+const toolContext = (sessionID = "ses-search", directory?: string, messageID?: string) =>
+    ({ sessionID, directory, messageID }) as never;
 const EXPAND_HINT =
     "Use ctx_expand(start, end) with the range from any message result above to read the conversation context. If the host no longer holds those messages, ctx_expand returns indexed text from the search archive only, with no surrounding messages or tool output.";
 const NOTE_EXPAND_HINT =
@@ -661,8 +663,120 @@ describe("createCtxSearchTools", () => {
             expect(result).toContain("[1] [memory]");
             expect(result).toContain(`id=${memory.id}`);
             expect(result).toContain("Direct id hit for the short-circuit.");
+            const emptySources = await tools.ctx_search.execute(
+                { query: `#${memory.id}`, sources: [] },
+                toolContext(),
+            );
+            expect(emptySources).toBe(result);
         } finally {
             spy.mockRestore();
+        }
+    });
+
+    it("runs explicit wiki-only ID-shaped queries for visible and invisible memory IDs when sources repeat", async () => {
+        const visible = insertMemory(db, {
+            projectPath: "/repo/wiki-id",
+            category: "RESEARCH",
+            content: "Visible memory with an ID-shaped query.",
+        });
+        const invisible = insertMemory(db, {
+            projectPath: "/repo/wiki-id",
+            category: "RESEARCH",
+            content: "Invisible memory with an ID-shaped query.",
+        });
+        db.prepare("INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)").run(
+            "ses-wiki-id",
+            JSON.stringify([visible.id]),
+        );
+        const wiki = spyOn(wikiSearchModule, "searchWikiCorpus").mockResolvedValue({
+            hits: [
+                {
+                    path: "guides/wiki.md",
+                    line: 7,
+                    snippet: "Wiki fixture hit",
+                    preview: "Wiki fixture hit",
+                    modifiedAtMs: Date.parse("2026-01-15T00:00:00.000Z"),
+                },
+            ],
+            partial: false,
+        });
+        try {
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/wiki-id",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                wiki: { enabled: true, source_root: "/tmp/global-wiki" },
+                readMessages: () => [],
+            });
+
+            for (const memory of [visible, invisible]) {
+                const result = await tools.ctx_search.execute(
+                    { query: `#${memory.id}`, sources: ["wiki", "wiki"] },
+                    toolContext("ses-wiki-id"),
+                );
+                expect(result).toContain("[wiki]");
+                expect(result).toContain("Wiki fixture hit");
+            }
+            expect(wiki).toHaveBeenCalledTimes(2);
+            expect(wiki.mock.calls.map((call) => call[0]?.query)).toEqual([
+                `#${visible.id}`,
+                `#${invisible.id}`,
+            ]);
+            const mixed = await tools.ctx_search.execute(
+                { query: `#${invisible.id}`, sources: ["wiki", "memory"] },
+                toolContext("ses-wiki-id"),
+            );
+            expect(mixed).toContain(`[memory]`);
+            expect(wiki).toHaveBeenCalledTimes(2);
+            const withoutMemory = await tools.ctx_search.execute(
+                { query: `#${invisible.id}`, sources: ["note", "wiki"] },
+                toolContext("ses-wiki-id"),
+            );
+            expect(withoutMemory).toContain("[wiki]");
+            expect(withoutMemory).not.toContain("[memory]");
+            expect(wiki).toHaveBeenCalledTimes(3);
+        } finally {
+            wiki.mockRestore();
+        }
+    });
+
+    it("passes raw edge newlines to the wiki lane from the tool without changing other query normalization", async () => {
+        const queries = ["\nalpha", "alpha\n", "\ralpha", "alpha\r"];
+        const originalSearch = searchModule.unifiedSearch;
+        const search = spyOn(searchModule, "unifiedSearch").mockImplementation(
+            (database, session, project, query, options) =>
+                originalSearch(database, session, project, query, options),
+        );
+        const wiki = spyOn(wikiSearchModule, "searchWikiCorpus").mockResolvedValue({
+            hits: [],
+            partial: false,
+        });
+        try {
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/wiki-id",
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                wiki: { enabled: true, source_root: "/tmp/global-wiki" },
+                readMessages: () => [],
+            });
+            for (const query of queries) {
+                await tools.ctx_search.execute(
+                    { query, sources: ["wiki"] },
+                    toolContext("ses-wiki-id"),
+                );
+            }
+            expect(wiki.mock.calls.map((call) => call[0]?.query)).toEqual(queries);
+            expect(search.mock.calls.map((call) => call[3])).toEqual([
+                "alpha",
+                "alpha",
+                "alpha",
+                "alpha",
+            ]);
+        } finally {
+            wiki.mockRestore();
+            search.mockRestore();
         }
     });
 
@@ -753,6 +867,7 @@ describe("createCtxSearchTools", () => {
         };
 
         const fusionSources = ["git_commit", "primer", "note", "message"] as const;
+        const defaultFusionSources = ["memory", ...fusionSources] as const;
 
         async function classic(sources?: Array<(typeof fusionSources)[number]>): Promise<string> {
             const tools = createCtxSearchTools({
@@ -815,25 +930,78 @@ describe("createCtxSearchTools", () => {
         });
 
         it("fuses selected mixed sources and preserves them on fallback", async () => {
-            const evidence = insertMemory(db, { projectPath: "/repo/project", category: "RESEARCH", content: "真实记忆 | 内容" });
-            db.prepare("INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)").run("ses-search", JSON.stringify([evidence.id]));
-            const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async (_db, _session, _project, _query, options) => [{
-                source: "message", content: options?.sources?.includes("memory") ? "full archive marker" : "selected archive marker", score: 1,
-                messageOrdinal: 3, messageId: "m3", role: "user", sessionId: "ses-search", messageTimeMs: null,
-            }]);
+            const evidence = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "RESEARCH",
+                content: "真实记忆 | 内容",
+            });
+            db.prepare("INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)").run(
+                "ses-search",
+                JSON.stringify([evidence.id]),
+            );
+            let wikiDiagnostic: "partial" | "unavailable" | null = null;
+            const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+                async (_db, _session, _project, _query, options) => {
+                    if (wikiDiagnostic === "partial" && options?.diagnostics) {
+                        options.diagnostics.wikiPartial = true;
+                    }
+                    if (wikiDiagnostic === "unavailable" && options?.diagnostics) {
+                        options.diagnostics.wikiUnavailable = "fff_unavailable";
+                    }
+                    return [
+                        {
+                            source: "message",
+                            content: options?.sources?.includes("memory")
+                                ? "full archive marker"
+                                : "selected archive marker",
+                            score: 1,
+                            messageOrdinal: 3,
+                            messageId: "m3",
+                            role: "user",
+                            sessionId: "ses-search",
+                            messageTimeMs: null,
+                        },
+                    ];
+                },
+            );
             let mode: "hit" | "miss" | "json-miss" | "invalid" | "failed" | "400" | "409" = "hit";
             let requests = 0;
             let content = "";
             const server = Bun.serve({
-                port: 0, hostname: "127.0.0.1",
+                port: 0,
+                hostname: "127.0.0.1",
                 async fetch(req) {
                     requests++;
-                    content = ((await req.json()) as { messages: Array<{ content: string }> }).messages[0]!.content;
+                    content = ((await req.json()) as { messages: Array<{ content: string }> })
+                        .messages[0]!.content;
                     if (mode === "failed" || mode === "400" || mode === "409") {
-                        return new Response(null, { status: mode === "failed" ? 404 : Number(mode) });
+                        return new Response(null, {
+                            status: mode === "failed" ? 404 : Number(mode),
+                        });
                     }
                     return Response.json({
-                        choices: [{ message: { content: mode === "hit" ? JSON.stringify({ answer: "融合答案", memoryIds: [evidence.id], externalRefs: ["note:7"] }) : mode === "json-miss" ? JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: [] }) : mode === "invalid" ? "旧格式" : "记忆库中无" } }],
+                        choices: [
+                            {
+                                message: {
+                                    content:
+                                        mode === "hit"
+                                            ? JSON.stringify({
+                                                  answer: "融合答案",
+                                                  memoryIds: [evidence.id],
+                                                  externalRefs: ["note:7"],
+                                              })
+                                            : mode === "json-miss"
+                                              ? JSON.stringify({
+                                                    answer: "记忆库中无",
+                                                    memoryIds: [],
+                                                    externalRefs: [],
+                                                })
+                                              : mode === "invalid"
+                                                ? "旧格式"
+                                                : "记忆库中无",
+                                },
+                            },
+                        ],
                         session: { splice: { resume_ok: true } },
                     });
                 },
@@ -842,35 +1010,73 @@ describe("createCtxSearchTools", () => {
             const prefixPath = join(dir, "prefix.json");
             writeFileSync(prefixPath, prefix);
             const common = {
-                db, resolveProjectPath: () => "/repo/project", memoryEnabled: true,
-                embeddingEnabled: false, readMessages: () => [],
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                wiki: { enabled: true, source_root: "/tmp/global-wiki" },
             };
             const tools = createCtxSearchTools({
                 ...common,
-                resolveStrataAsk: () => ({ ...connection, baseUrl: String(server.url).replace(/\/$/, ""), prefixPath }),
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
             });
             const ctx = toolContext("ses-search", "/repo/project");
-            const sources: Array<"message" | "memory" | "note"> = ["message", "memory", "note", "memory"];
+            const sources: Array<"message" | "memory" | "note"> = [
+                "message",
+                "memory",
+                "note",
+                "memory",
+            ];
             const args = { query, sources, limit: 2 };
             try {
                 const baseline = await createCtxSearchTools(common).ctx_search.execute(
-                    { query, sources: ["message", "note"], limit: 2 }, ctx,
+                    { query, sources: ["message", "note"], limit: 2 },
+                    ctx,
                 );
-                const fullBaseline = await createCtxSearchTools(common).ctx_search.execute(args, ctx);
+                const fullBaseline = await createCtxSearchTools(common).ctx_search.execute(
+                    args,
+                    ctx,
+                );
                 expect(baseline).toContain("selected archive marker");
                 expect(fullBaseline).toContain("full archive marker");
                 expect(baseline).not.toBe(fullBaseline);
                 spy.mockClear();
-                expect(await tools.ctx_search.execute(args, ctx)).toBe(`答案：\n融合答案\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #${evidence.id} | 真实记忆 \\| 内容 |\n${STRATA_ASK_FOOTER}（取非记忆原文时，sources 须排除 memory，例如 sources:['note']）`);
+                expect(await tools.ctx_search.execute(args, ctx)).toBe(
+                    `答案：\n融合答案\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #${evidence.id} | 真实记忆 \\| 内容 |\n${STRATA_ASK_FOOTER}（取非记忆原文时，sources 须排除 memory，例如 sources:['note']）`,
+                );
                 expect(spy).toHaveBeenCalledTimes(1);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
+                expect(spy.mock.calls[0]?.[4]?.wikiFallback).toBe(false);
                 expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
                 expect(content).toContain("selected archive marker");
                 expect(content).toContain(`问题：${query}`);
-                expect(args).toEqual({ query, sources: ["message", "memory", "note", "memory"], limit: 2 });
+                for (const diagnostic of ["partial", "unavailable"] as const) {
+                    wikiDiagnostic = diagnostic;
+                    const diagnosticAnswer = await tools.ctx_search.execute({ query }, ctx);
+                    expect(diagnosticAnswer).toContain("融合答案");
+                    expect(diagnosticAnswer).toContain(
+                        diagnostic === "partial"
+                            ? "Wiki: more matches may exist beyond the bounded first page; this result may be incomplete."
+                            : "Wiki: source unavailable (fff_unavailable).",
+                    );
+                }
+                wikiDiagnostic = null;
+                expect(args).toEqual({
+                    query,
+                    sources: ["message", "memory", "note", "memory"],
+                    limit: 2,
+                });
                 const beforeInvalid = requests;
                 spy.mockClear();
-                const invalid = await tools.ctx_search.execute({ query, sources: ["memory", "unknown"] } as never, ctx);
+                const invalid = await tools.ctx_search.execute(
+                    { query, sources: ["memory", "unknown"] } as never,
+                    ctx,
+                );
                 expect(invalid).toContain("full archive marker");
                 expect(requests).toBe(beforeInvalid);
                 expect(spy).toHaveBeenCalledTimes(1);
@@ -901,7 +1107,11 @@ describe("createCtxSearchTools", () => {
                 expect(spy).toHaveBeenCalledTimes(2);
                 expect(spy.mock.calls[0]?.[4]?.sources).toEqual(["message", "note"]);
                 expect(spy.mock.calls[1]?.[4]?.sources).toEqual(["message", "memory", "note"]);
-                expect(args).toEqual({ query, sources: ["message", "memory", "note", "memory"], limit: 2 });
+                expect(args).toEqual({
+                    query,
+                    sources: ["message", "memory", "note", "memory"],
+                    limit: 2,
+                });
             } finally {
                 spy.mockRestore();
                 server.stop(true);
@@ -909,7 +1119,7 @@ describe("createCtxSearchTools", () => {
             }
         });
 
-        it("pre-runs non-memory classic once, sends its materials and leaves prefix.json untouched on a bare hit", async () => {
+        it("pre-runs the default internal sources once, sends non-memory materials and leaves prefix.json untouched", async () => {
             const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([
                 {
                     source: "message",
@@ -968,12 +1178,424 @@ describe("createCtxSearchTools", () => {
                 expect(result).not.toContain("Found ");
                 expect(result).not.toContain("skip");
                 expect(spy).toHaveBeenCalledTimes(1);
-                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...defaultFusionSources]);
                 expect(chatMessages[0]?.content).toContain("sqlite archive marker");
                 expect(chatMessages[0]?.content).toContain(`问题：${query}`);
                 expect(readFileSync(prefixPath, "utf8")).toBe(prefix);
             } finally {
                 spy.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("passes the real user and executing assistant ids only for wiki gating", async () => {
+            const search = spyOn(searchModule, "unifiedSearch").mockResolvedValue([]);
+            let reads = 0;
+            let currentAssistantPresent = false;
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                readMessages: () => {
+                    reads++;
+                    return [
+                        { ordinal: 2, id: "u2", role: "user", parts: [{ type: "text" }] },
+                        { ordinal: 3, id: "a3", role: "assistant", parts: [] },
+                        {
+                            ordinal: 4,
+                            id: "u4",
+                            role: "user",
+                            storeType: "user",
+                            parts: [{ type: "image", mime: "image/png" }],
+                        },
+                        // OpenCode 2 projects these host-only rows as role=user;
+                        // none is the real current prompt.
+                        { ordinal: 5, id: "sh5", role: "user", storeType: "shell", parts: [] },
+                        {
+                            ordinal: 6,
+                            id: "sy6",
+                            role: "user",
+                            storeType: "synthetic",
+                            parts: [],
+                        },
+                        { ordinal: 7, id: "sk7", role: "user", storeType: "skill", parts: [] },
+                        {
+                            ordinal: 8,
+                            id: "a8",
+                            role: "assistant",
+                            parts: [{ type: "text", text: "dnsmasq earlier" }],
+                        },
+                        ...(currentAssistantPresent
+                            ? [{ ordinal: 9, id: "a9", role: "assistant" as const, parts: [] }]
+                            : []),
+                    ];
+                },
+            });
+            try {
+                await tools.ctx_search.execute(
+                    { query: "dnsmasq" },
+                    toolContext("ses-search", "/repo/project", "a9"),
+                );
+                expect(search.mock.calls[0]?.[4]?.wikiFallback).toBe(true);
+                // The current a9 is absent; earlier a8 must not be selected by position.
+                expect(search.mock.calls[0]?.[4]?.currentQueryMessageIds).toEqual(["u4"]);
+                currentAssistantPresent = true;
+                await tools.ctx_search.execute(
+                    { query: "dnsmasq" },
+                    toolContext("ses-search", "/repo/project", "a9"),
+                );
+                expect(search.mock.calls[1]?.[4]?.currentQueryMessageIds).toEqual(["u4", "a9"]);
+                await tools.ctx_search.execute(
+                    { query: "dnsmasq", sources: ["note"] },
+                    toolContext("ses-search", "/repo/project", "a9"),
+                );
+                expect(reads).toBe(2);
+                expect(search.mock.calls[2]?.[4]?.currentQueryMessageIds).toBeUndefined();
+            } finally {
+                search.mockRestore();
+            }
+        });
+
+        it("adds the wiki source to the fusion pre-run only when user config enables it", async () => {
+            for (const enabled of [false, true]) {
+                const spy = spyOn(searchModule, "unifiedSearch").mockResolvedValue([
+                    {
+                        source: "message",
+                        content: "sqlite archive marker",
+                        score: 1,
+                        messageOrdinal: 3,
+                        messageId: "m3",
+                        role: "user",
+                        sessionId: "ses-search",
+                        messageTimeMs: null,
+                    },
+                ]);
+                const server = Bun.serve({
+                    port: 0,
+                    hostname: "127.0.0.1",
+                    fetch() {
+                        return Response.json({
+                            choices: [
+                                {
+                                    message: {
+                                        content: JSON.stringify({
+                                            answer: "答案一行",
+                                            memoryIds: [],
+                                        }),
+                                    },
+                                },
+                            ],
+                            session: { splice: { resume_ok: true } },
+                        });
+                    },
+                });
+                const dir = createTestTempDirFromPath(join(tmpdir(), "mc-wiki-fusion-"));
+                const prefixPath = join(dir, "prefix.json");
+                writeFileSync(prefixPath, prefix);
+                const wiki = { enabled, source_root: "/tmp/global-wiki" };
+                try {
+                    const tools = createCtxSearchTools({
+                        db,
+                        resolveProjectPath: () => "/repo/project",
+                        memoryEnabled: false,
+                        embeddingEnabled: false,
+                        readMessages: () => [],
+                        wiki,
+                        resolveStrataAsk: () => ({
+                            ...connection,
+                            baseUrl: String(server.url).replace(/\/$/, ""),
+                            prefixPath,
+                        }),
+                    });
+                    await tools.ctx_search.execute(
+                        { query },
+                        toolContext("ses-search", "/repo/project"),
+                    );
+                    expect(spy.mock.calls[0]?.[4]?.sources).toEqual(
+                        enabled ? [...defaultFusionSources, "wiki"] : [...defaultFusionSources],
+                    );
+                    expect(spy.mock.calls[0]?.[4]?.wiki).toEqual(wiki);
+                    expect(spy.mock.calls[0]?.[4]?.wikiFallback).toBe(true);
+                } finally {
+                    spy.mockRestore();
+                    server.stop(true);
+                    rmSync(dir, { recursive: true, force: true });
+                }
+            }
+        });
+
+        it("lets memory and suppressed-visible memory prevent wiki in the default fusion pre-run", async () => {
+            const gateQuery = "default memory wiki gate needle";
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "RESEARCH",
+                content: `${gateQuery} stored only in project memory`,
+            });
+            const originalSearch = searchModule.unifiedSearch;
+            const search = spyOn(searchModule, "unifiedSearch").mockImplementation(
+                (database, session, project, searchQuery, options) =>
+                    originalSearch(database, session, project, searchQuery, options),
+            );
+            const wiki = spyOn(wikiSearchModule, "searchWikiCorpus").mockResolvedValue({
+                hits: [
+                    {
+                        path: "unused.md",
+                        line: 1,
+                        snippet: "wiki must not run",
+                        preview: "wiki must not run",
+                        modifiedAtMs: Date.parse("2026-01-15T00:00:00.000Z"),
+                    },
+                ],
+                partial: false,
+            });
+            let requests = 0;
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                fetch() {
+                    requests++;
+                    return Response.json({
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }),
+                                },
+                            },
+                        ],
+                        session: { splice: { resume_ok: true } },
+                    });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-memory-wiki-gate-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                wiki: { enabled: true, source_root: "/tmp/wiki-must-not-run" },
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
+            });
+            try {
+                for (const suppress of [false, true]) {
+                    if (suppress) {
+                        db.prepare(
+                            `INSERT INTO session_meta (session_id, memory_block_ids) VALUES (?, ?)
+                             ON CONFLICT(session_id) DO UPDATE SET memory_block_ids=excluded.memory_block_ids`,
+                        ).run("ses-search", JSON.stringify([memory.id]));
+                    }
+                    const before = requests;
+                    const output = await tools.ctx_search.execute(
+                        { query: gateQuery },
+                        toolContext("ses-search", "/repo/project"),
+                    );
+                    expect(output).toContain("记忆答案");
+                    expect(requests).toBe(before + 1);
+                }
+                expect(wiki).not.toHaveBeenCalled();
+                expect(search).toHaveBeenCalledTimes(2);
+                for (const call of search.mock.calls) {
+                    expect(call[4]?.sources).toContain("memory");
+                    expect(call[4]?.sources).toContain("wiki");
+                    expect(call[4]?.wikiFallback).toBe(true);
+                    expect(call[4]?.memoryGateOnly).toBe(true);
+                }
+            } finally {
+                search.mockRestore();
+                wiki.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("keeps a note over gate-only memory at limit one in the default fusion pre-run", async () => {
+            const limitQuery = "memory gate limit note needle";
+            insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "RESEARCH",
+                content: `${limitQuery} memory only`,
+            });
+            addNote(db, "session", {
+                sessionId: "ses-search",
+                content: `${limitQuery} note survives the limit`,
+            });
+            const originalSearch = searchModule.unifiedSearch;
+            const search = spyOn(searchModule, "unifiedSearch").mockImplementation(
+                (database, session, project, searchQuery, options) =>
+                    originalSearch(database, session, project, searchQuery, options),
+            );
+            const wiki = spyOn(wikiSearchModule, "searchWikiCorpus").mockResolvedValue({
+                hits: [],
+                partial: false,
+            });
+            let requests = 0;
+            let content = "";
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    requests++;
+                    content = ((await req.json()) as { messages: Array<{ content: string }> })
+                        .messages[0]!.content;
+                    return Response.json({
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({ answer: "限额答案", memoryIds: [] }),
+                                },
+                            },
+                        ],
+                        session: { splice: { resume_ok: true } },
+                    });
+                },
+            });
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-memory-gate-limit-"));
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                wiki: { enabled: true, source_root: "/tmp/wiki-must-not-run" },
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
+            });
+            try {
+                const output = await tools.ctx_search.execute(
+                    { query: limitQuery, limit: 1 },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(output).toContain("限额答案");
+                expect(content).toContain("note survives the limit");
+                expect(requests).toBe(1);
+                expect(wiki).not.toHaveBeenCalled();
+                expect(search).toHaveBeenCalledTimes(1);
+                expect(search.mock.calls[0]?.[4]?.memoryGateOnly).toBe(true);
+            } finally {
+                search.mockRestore();
+                wiki.mockRestore();
+                server.stop(true);
+                rmSync(dir, { recursive: true, force: true });
+            }
+        });
+
+        it("feeds fallback sections to one answer call and appends only their citations", async () => {
+            const fallbackQuery = "wiki fallback needle";
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-wiki-fallback-fusion-"));
+            const root = join(dir, "corpus");
+            mkdirSync(root, { recursive: true });
+            writeFileSync(
+                join(root, "guide.md"),
+                [
+                    "# Setup",
+                    "before ".repeat(100),
+                    `${fallbackQuery} section-tail ${"after ".repeat(100)}`,
+                    "## Next",
+                    "outside the matched section",
+                ].join("\n"),
+            );
+            const prefixPath = join(dir, "prefix.json");
+            writeFileSync(prefixPath, prefix);
+            const originalSearch = searchModule.unifiedSearch;
+            const search = spyOn(searchModule, "unifiedSearch").mockImplementation(
+                (database, session, project, searchQuery, options) =>
+                    originalSearch(database, session, project, searchQuery, options),
+            );
+            const wiki = spyOn(wikiSearchModule, "searchWikiCorpus").mockResolvedValue({
+                hits: [
+                    {
+                        path: "guide.md",
+                        line: 3,
+                        snippet: "native snippet",
+                        preview: fallbackQuery,
+                        modifiedAtMs: Date.parse("2026-01-15T00:00:00.000Z"),
+                    },
+                ],
+                partial: false,
+            });
+            let requests = 0;
+            let content = "";
+            let mode: "answered" | "conflict" = "answered";
+            const server = Bun.serve({
+                port: 0,
+                hostname: "127.0.0.1",
+                async fetch(req) {
+                    requests++;
+                    if (mode === "conflict") return new Response(null, { status: 409 });
+                    content = ((await req.json()) as { messages: Array<{ content: string }> })
+                        .messages[0]!.content;
+                    return Response.json({
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({
+                                        answer: "wiki 融合答案",
+                                        memoryIds: [],
+                                    }),
+                                },
+                            },
+                        ],
+                        session: { splice: { resume_ok: true } },
+                    });
+                },
+            });
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+                wiki: { enabled: true, source_root: root },
+                resolveStrataAsk: () => ({
+                    ...connection,
+                    baseUrl: String(server.url).replace(/\/$/, ""),
+                    prefixPath,
+                }),
+            });
+            try {
+                const output = await tools.ctx_search.execute(
+                    { query: fallbackQuery },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(requests).toBe(1);
+                expect(wiki).toHaveBeenCalledTimes(1);
+                expect(search).toHaveBeenCalledTimes(1);
+                expect(search.mock.calls[0]?.[4]?.wikiFallback).toBe(true);
+                expect(search.mock.calls[0]?.[4]?.sources).toContain("memory");
+                expect(content).toContain("section-tail");
+                expect(content).toContain("after after");
+                expect(content).not.toContain("Wiki 小节：");
+                expect(output).toContain("wiki 融合答案");
+                expect(output).toContain("Wiki 小节：\n- [wiki] guide.md:1-3 《Setup》");
+
+                mode = "conflict";
+                const classicFallback = await tools.ctx_search.execute(
+                    { query: fallbackQuery },
+                    toolContext("ses-search", "/repo/project"),
+                );
+                expect(requests).toBe(2);
+                // The conflict query does its fusion pre-run plus full classic
+                // fallback; that is one extra search, not another answer call.
+                expect(search).toHaveBeenCalledTimes(3);
+                expect(wiki).toHaveBeenCalledTimes(3);
+                expect(classicFallback).toContain("[wiki]");
+                expect(classicFallback).not.toContain("Wiki 小节：");
+            } finally {
+                search.mockRestore();
+                wiki.mockRestore();
                 server.stop(true);
                 rmSync(dir, { recursive: true, force: true });
             }
@@ -1103,7 +1725,7 @@ describe("createCtxSearchTools", () => {
             }
         });
 
-        it("reuses the one non-memory classic result on a cache miss", async () => {
+        it("reuses the one default classic pre-run on a cache miss", async () => {
             let chatMessages: Array<{ role: string; content: string }> = [];
             const server = Bun.serve({
                 port: 0,
@@ -1140,7 +1762,7 @@ describe("createCtxSearchTools", () => {
                 );
                 expect(result).toBe(baseline);
                 expect(spy).toHaveBeenCalledTimes(1);
-                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...defaultFusionSources]);
                 expect(chatMessages[0]?.content).toBe(
                     STRATA_ASK_T4.replace("{status}", "").replace("{q}", query),
                 );
@@ -1151,7 +1773,7 @@ describe("createCtxSearchTools", () => {
             }
         });
 
-        it("reuses the one non-memory classic result when Strata fails", async () => {
+        it("reuses the one default classic pre-run when Strata fails", async () => {
             const server = Bun.serve({
                 port: 0,
                 hostname: "127.0.0.1",
@@ -1183,7 +1805,7 @@ describe("createCtxSearchTools", () => {
                     ),
                 ).toBe(baseline);
                 expect(spy).toHaveBeenCalledTimes(1);
-                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...defaultFusionSources]);
             } finally {
                 spy.mockRestore();
                 server.stop(true);
@@ -1374,7 +1996,24 @@ describe("createCtxSearchTools", () => {
                     ).messages;
                     return Response.json({
                         choices: [
-                            { message: { content: mode === "miss" ? "记忆库中无" : mode === "json-miss" ? JSON.stringify({ answer: "记忆库中无", memoryIds: [] }) : mode === "invalid" ? "旧格式" : JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } },
+                            {
+                                message: {
+                                    content:
+                                        mode === "miss"
+                                            ? "记忆库中无"
+                                            : mode === "json-miss"
+                                              ? JSON.stringify({
+                                                    answer: "记忆库中无",
+                                                    memoryIds: [],
+                                                })
+                                              : mode === "invalid"
+                                                ? "旧格式"
+                                                : JSON.stringify({
+                                                      answer: "记忆答案",
+                                                      memoryIds: [],
+                                                  }),
+                                },
+                            },
                         ],
                         session: { restored: { tokens: 3 } },
                     });
@@ -1419,7 +2058,9 @@ describe("createCtxSearchTools", () => {
                     { query, sources: ["memory"] },
                     ctx,
                 );
-                expect(answered).toBe(`答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
+                expect(answered).toBe(
+                    `答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+                );
                 expect(spy).toHaveBeenCalledTimes(0);
                 expect(chatMessages[0]?.content).toBe(
                     STRATA_ASK_T4.replace("{status}", "").replace("{q}", query),
@@ -1430,9 +2071,13 @@ describe("createCtxSearchTools", () => {
                 ).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
                 expect(spy).toHaveBeenCalledTimes(0);
                 mode = "json-miss";
-                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(`记忆库中无\n${STRATA_ASK_FOOTER}`);
+                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(
+                    `记忆库中无\n${STRATA_ASK_FOOTER}`,
+                );
                 mode = "invalid";
-                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(baseline);
+                expect(await tools.ctx_search.execute({ query, sources: ["memory"] }, ctx)).toBe(
+                    baseline,
+                );
                 expect(spy).toHaveBeenCalledTimes(1);
                 spy.mockClear();
                 mode = "failed";
@@ -1457,7 +2102,13 @@ describe("createCtxSearchTools", () => {
                     const body = (await req.json()) as { messages: Array<{ content: string }> };
                     contents.push(body.messages[0]!.content);
                     return Response.json({
-                        choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }],
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }),
+                                },
+                            },
+                        ],
                         session: { splice: { resume_ok: true } },
                     });
                 },
@@ -1538,7 +2189,15 @@ describe("createCtxSearchTools", () => {
                 hostname: "127.0.0.1",
                 fetch() {
                     chatRequests++;
-                    return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }] });
+                    return Response.json({
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }),
+                                },
+                            },
+                        ],
+                    });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-prefix-"));
@@ -1610,7 +2269,15 @@ describe("createCtxSearchTools", () => {
                 async fetch(req) {
                     const body = (await req.json()) as { messages: Array<{ content: string }> };
                     messages.push(body.messages[0]!.content);
-                    return Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }) } }] });
+                    return Response.json({
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({ answer: "记忆答案", memoryIds: [] }),
+                                },
+                            },
+                        ],
+                    });
                 },
             });
             const dir = createTestTempDirFromPath(join(tmpdir(), "mc-strata-retained-"));
@@ -1678,7 +2345,9 @@ describe("createCtxSearchTools", () => {
                     const before = messages.length;
                     expect(
                         await routed.ctx_search.execute({ query, sources: ["memory"] }, ctx),
-                    ).toBe(`答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
+                    ).toBe(
+                        `答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+                    );
                     expect(await routed.ctx_search.execute({ query }, ctx)).toBe(
                         `答案：\n记忆答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
                     );
@@ -1810,7 +2479,7 @@ describe("createCtxSearchTools", () => {
                     expect(fused).toBe(baselineAll);
                     expect(fused).not.toContain("讣");
                     expect(search).toHaveBeenCalledTimes(2);
-                    expect(search.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                    expect(search.mock.calls[0]?.[4]?.sources).toEqual([...defaultFusionSources]);
                     expect(search.mock.calls[1]?.[4]?.sources).toBeUndefined();
                 }
                 // The dashboard can also restore an edit for an ID absent from
@@ -1846,7 +2515,13 @@ describe("createCtxSearchTools", () => {
                         (await req.json()) as { messages: Array<{ role: string; content: string }> }
                     ).messages;
                     return Response.json({
-                        choices: [{ message: { content: JSON.stringify({ answer: "限额答案", memoryIds: [] }) } }],
+                        choices: [
+                            {
+                                message: {
+                                    content: JSON.stringify({ answer: "限额答案", memoryIds: [] }),
+                                },
+                            },
+                        ],
                         session: { splice: { resume_ok: true } },
                     });
                 },
@@ -1870,16 +2545,20 @@ describe("createCtxSearchTools", () => {
             const ctx = toolContext("ses-search", "/repo/project");
             try {
                 const fused = await tools.ctx_search.execute({ query, limit: 2 }, ctx);
-                expect(fused).toBe(`答案：\n限额答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
+                expect(fused).toBe(
+                    `答案：\n限额答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+                );
                 expect(spy).toHaveBeenCalledTimes(1);
-                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...fusionSources]);
+                expect(spy.mock.calls[0]?.[4]?.sources).toEqual([...defaultFusionSources]);
                 expect(spy.mock.calls[0]?.[4]?.limit).toBe(2);
                 spy.mockClear();
                 const memoryOnly = await tools.ctx_search.execute(
                     { query, sources: ["memory"], limit: 2 },
                     ctx,
                 );
-                expect(memoryOnly).toBe(`答案：\n限额答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`);
+                expect(memoryOnly).toBe(
+                    `答案：\n限额答案\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+                );
                 expect(spy).toHaveBeenCalledTimes(0);
                 expect(chatMessages[0]?.content).toBe(
                     STRATA_ASK_T4.replace("{status}", "").replace("{q}", query),
@@ -1927,9 +2606,18 @@ describe("createCtxSearchTools", () => {
                 await tools.ctx_search.execute({ query, from: "2026-01-01" }, ctx);
                 await tools.ctx_search.execute({ query, to: "2026-02-01" }, ctx);
                 await tools.ctx_search.execute({ query: "#1035" }, ctx);
-                await tools.ctx_search.execute({ query, sources: ["memory", "note"], from: "2026-01-01" }, ctx);
-                await tools.ctx_search.execute({ query, sources: ["memory", "note"], to: "2026-02-01" }, ctx);
-                await tools.ctx_search.execute({ query: "#1035", sources: ["memory", "note"] }, ctx);
+                await tools.ctx_search.execute(
+                    { query, sources: ["memory", "note"], from: "2026-01-01" },
+                    ctx,
+                );
+                await tools.ctx_search.execute(
+                    { query, sources: ["memory", "note"], to: "2026-02-01" },
+                    ctx,
+                );
+                await tools.ctx_search.execute(
+                    { query: "#1035", sources: ["memory", "note"] },
+                    ctx,
+                );
                 expect(calls).toBe(0);
                 expect(resolved).toBe(0);
             } finally {

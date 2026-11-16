@@ -346,6 +346,45 @@ describe("storage-memory", () => {
         });
     });
 
+    it("preserves relaxed recall by default and honors strict workspace/date eligibility", () => {
+        db = makeMemoryDatabase();
+        const partial = insertMemory(db, {
+            projectPath: "/repo/own",
+            category: "NAMING",
+            content: "alpha partial memory",
+        });
+        const old = insertMemory(db, {
+            projectPath: "/repo/own",
+            category: "NAMING",
+            content: "alpha beta old memory",
+        });
+        const shared = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "CONSTRAINTS",
+            content: "alpha beta shared memory",
+        });
+        const hidden = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "NAMING",
+            content: "alpha beta hidden memory",
+        });
+        db.prepare("UPDATE memories SET created_at = ? WHERE id = ?").run(10, old.id);
+        for (const id of [partial.id, shared.id, hidden.id]) {
+            db.prepare("UPDATE memories SET created_at = ? WHERE id = ?").run(30, id);
+        }
+        const dateRange = { from: 20, to: 40 };
+        const own = ["/repo/own"];
+        const all = ["/repo/own", "/repo/foreign"];
+        const ids = (memories: Array<{ id: number }>) => memories.map((memory) => memory.id);
+
+        expect(ids(searchMemoriesFTS(db, own[0]!, "alpha beta", 10, dateRange))).toEqual([partial.id]);
+        expect(searchMemoriesFTS(db, own[0]!, "alpha beta", 10, dateRange, false)).toEqual([]);
+        expect(searchMemoriesFTSUnion(db, own, "alpha beta", 10, undefined, undefined, dateRange, false)).toEqual([]);
+        expect(ids(searchMemoriesFTSUnion(db, all, "alpha beta", 10, own, ["CONSTRAINTS"], dateRange, false))).toEqual([shared.id]);
+        expect(searchMemoriesFTSUnion(db, all, "alpha beta", 10, own, [], dateRange, false)).toEqual([]);
+        expect(ids(searchMemoriesFTSUnion(db, all, "alpha beta", 10, own, [], dateRange))).toEqual([partial.id]);
+    });
+
     it("#when workspace sharing is narrowed #then baseline delta watermark and FTS agree", () => {
         db = makeMemoryDatabase();
         const ownRule = insertMemory(db, {

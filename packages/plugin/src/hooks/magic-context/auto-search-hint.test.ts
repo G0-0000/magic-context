@@ -87,6 +87,28 @@ describe("buildAutoSearchHint", () => {
         const many = buildAutoSearchHint([memory("one"), memory("two")]);
         expect(many).toContain("2 related fragments");
     });
+
+    it("renders a wiki fragment defensively, without leaking its corpus path", () => {
+        // Automatic hints never request the wiki source (auto-search-runner pins
+        // memory/message/git_commit only). This branch exists so the exhaustive
+        // switch stays total if a caller ever hands the renderer one.
+        const wiki: UnifiedSearchResult = {
+            source: "wiki",
+            content: "wiki corpus literal match renders a path and a line number",
+            snippet: "before\\nwiki corpus literal match renders a path and a line number\\nafter",
+            score: 0.9,
+            path: "guides/architecture.md",
+            line: 44,
+            modifiedAtMs: 1_700_000_000_000,
+        };
+        const hint = buildAutoSearchHint([wiki]);
+        expect(hint).not.toBeNull();
+        expect(hint).toContain("1 related fragment");
+        expect(hint?.split("\n").some((line) => line.startsWith("- "))).toBe(true);
+        // The fragment is the compressed content only; the corpus location stays
+        // out of automatic hint text.
+        expect(hint).not.toContain("guides/architecture.md");
+    });
 });
 
 describe("selectAutoSearchResults", () => {

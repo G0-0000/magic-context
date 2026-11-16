@@ -1188,6 +1188,7 @@ export async function registerContext(context: V2Context) {
                   moduleToolBackends?.backends,
                   (id) => hiddenChildHook.owns(id),
                   embeddings.ensureRegistered,
+                  (sessionID) => readAllForConversion(sessionID),
               )
             : undefined;
     const generateReplay = new V2GenerateReplay();

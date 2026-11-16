@@ -28,40 +28,46 @@ import {
 import {
 	createUnifiedSearchDiagnostics,
 	formatSearchResults,
+	formatWikiSearchDiagnostics,
 	parseIdShapedQuery,
+	type ReservedSearchCandidates,
 	resolveMemoriesByIdsForSearch,
 	unifiedSearch,
-	type ReservedSearchCandidates,
 } from "@magic-context/core/features/magic-context/search";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { log } from "@magic-context/core/shared/logger";
+import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import { CTX_SEARCH_DESCRIPTION } from "@magic-context/core/tools/ctx-search/constants";
 import {
 	parseSearchDateRange,
 	SearchDateRangeError,
 } from "@magic-context/core/tools/ctx-search/date-range";
 import {
-	STRATA_ASK_FOOTER,
-	STRATA_ASK_MISS,
 	hasUnsafeStrataCache,
 	isStrataConfigResolutionFailure,
 	mixedSourcesAnswer,
 	readStrataStatusDocument,
+	STRATA_ASK_FOOTER,
+	STRATA_ASK_MISS,
+	type StrataAskConnection,
 	strataAskConnectionForProject,
 	strataRouteFor,
 	tryStrataAskDetailed,
-	type StrataAskConnection,
 } from "@magic-context/core/tools/ctx-search/strata-ask";
 import {
 	buildReservedHits,
 	buildTransientMaterial,
-	withReservedAppendix,
 	type TransientMaterial,
+	withReservedAppendix,
 } from "@magic-context/core/tools/ctx-search/transient-material";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 import { loadPiConfigDetailed } from "../config";
+import {
+	readPiSessionMessages,
+	SYNTH_USER_ID_PREFIX,
+} from "../read-session-pi";
 
 /**
  * Call-cwd strata connection. Substitution failure, parse/schema failure, and
@@ -71,7 +77,10 @@ export function resolvePiStrataAsk(cwd: string): StrataAskConnection | null {
 	try {
 		const loaded = loadPiConfigDetailed({ cwd }, false);
 		if (isStrataConfigResolutionFailure(loaded.loadOutcome)) return null;
-		const project = resolveProjectIdentityForSession(cwd, loaded.config.allow_home_project);
+		const project = resolveProjectIdentityForSession(
+			cwd,
+			loaded.config.allow_home_project,
+		);
 		return strataAskConnectionForProject(loaded.config, project);
 	} catch {
 		return null;
@@ -111,10 +120,11 @@ const ParamsSchema = Type.Object(
 					Type.Literal("git_commit"),
 					Type.Literal("primer"),
 					Type.Literal("note"),
+					Type.Literal("wiki"),
 				]),
 				{
 					description:
-						"Restrict to these sources; omitting it or passing [] searches every source.",
+						"Restrict to these sources; omitting it or passing [] searches every enabled source.",
 				},
 			),
 		),
@@ -148,12 +158,24 @@ export interface CtxSearchToolDeps {
 	gitCommitsEnabled?: boolean;
 	rerankConnectionFile?: string;
 	rerankConfig?: import("@magic-context/core/config/schema/magic-context").RerankConfig;
+	/** User-level global wiki corpus. Every project shares one root; omitted keeps the source off. */
+	wiki?: import("@magic-context/core/config/schema/magic-context").WikiConfig;
 	/** Resolve a directory's project identity, allowing home only when user-level configuration enables it. */
 	resolveProjectIdentity?: (directory: string) => string | undefined;
 	/** Trust-filtered strata connection for the call cwd, or null when disabled. */
 	resolveStrataAsk?: (
 		directory: string,
-	) => import("@magic-context/core/tools/ctx-search/strata-ask").StrataAskConnection | null;
+	) =>
+		| import("@magic-context/core/tools/ctx-search/strata-ask").StrataAskConnection
+		| null;
+	/** Raw host rows, including user prompts too large or image-only for FTS. */
+	readMessages?: (sessionId: string) => Array<{
+		ordinal: number;
+		id: string;
+		role: string;
+		parts: unknown[];
+		storeType?: string;
+	}>;
 }
 
 export function createCtxSearchTool(
@@ -166,13 +188,7 @@ export function createCtxSearchTool(
 		label: "Magic Context: Search",
 		description: CTX_SEARCH_DESCRIPTION,
 		parameters: ParamsSchema,
-		async execute(
-			_toolCallId,
-			params: CtxSearchParams,
-			signal,
-			_onUpdate,
-			ctx,
-		) {
+		async execute(toolCallId, params: CtxSearchParams, signal, _onUpdate, ctx) {
 			params = unwrapImitatedReducedArgs(params, ["query"], {
 				query: "string",
 				limit: "number",
@@ -181,11 +197,12 @@ export function createCtxSearchTool(
 				sources: {
 					type: "array",
 					items: "string",
-					maxItems: 5,
-					values: ["memory", "message", "git_commit", "primer", "note"],
+					maxItems: 6,
+					values: ["memory", "message", "git_commit", "primer", "note", "wiki"],
 				},
 			});
-			const query = params.query?.trim();
+			const rawQuery = params.query ?? "";
+			const query = rawQuery.trim();
 			if (!query) {
 				return {
 					content: [{ type: "text", text: "Error: 'query' is required." }],
@@ -215,9 +232,15 @@ export function createCtxSearchTool(
 				return resolvedProjectIdentity;
 			};
 			const sessionId = ctx.sessionManager.getSessionId();
-			const runClassic = async (overrides?: {
-				sources?: CtxSearchParams["sources"];
-			}, collectReserved?: (candidates: ReservedSearchCandidates) => void) => {
+			const runClassic = async (
+				overrides?: {
+					sources?: CtxSearchParams["sources"];
+					wikiFallback?: boolean;
+					/** Memory gates wiki but stays out of the non-memory fusion fallback text. */
+					memoryGateOnly?: boolean;
+				},
+				collectReserved?: (candidates: ReservedSearchCandidates) => void,
+			) => {
 				const projectIdentity = resolveProjectForCall();
 				if (!projectIdentity) {
 					return {
@@ -261,7 +284,11 @@ export function createCtxSearchTool(
 				// ID-shaped short-circuit (parity with OpenCode ctx_search).
 				// Unresolved IDs still fall through to normal text search.
 				const idShape = parseIdShapedQuery(query);
-				if (idShape && memoryEnabled) {
+				const normalizedSources = normalizeSources(params.sources);
+				const selectedSources = new Set(normalizedSources ?? []);
+				const memorySourceSelected =
+					normalizedSources === undefined || selectedSources.has("memory");
+				if (idShape && memoryEnabled && memorySourceSelected) {
 					const idResults = resolveMemoriesByIdsForSearch({
 						db: deps.db,
 						projectPath: projectIdentity,
@@ -285,6 +312,47 @@ export function createCtxSearchTool(
 					}
 				}
 
+				const wikiFallback =
+					overrides?.wikiFallback ?? normalizedSources === undefined;
+				let currentQueryMessageIds: string[] | undefined;
+				if (wikiFallback) {
+					try {
+						const rawMessages = deps.readMessages
+							? deps.readMessages(sessionId)
+							: readPiSessionMessages(ctx);
+						let currentRealUserIndex = -1;
+						for (let index = rawMessages.length - 1; index >= 0; index--) {
+							const message = rawMessages[index]!;
+							if (
+								message.role === "user" &&
+								!message.id.startsWith(SYNTH_USER_ID_PREFIX)
+							) {
+								currentRealUserIndex = index;
+								break;
+							}
+						}
+						if (currentRealUserIndex >= 0) {
+							currentQueryMessageIds = [rawMessages[currentRealUserIndex]!.id];
+							const currentAssistant = rawMessages
+								.slice(currentRealUserIndex + 1)
+								.find(
+									(message) =>
+										message.role === "assistant" &&
+										message.parts.some(
+											(part) =>
+												isRecord(part) &&
+												part.type === "tool" &&
+												part.callID === toolCallId,
+										),
+								);
+							if (currentAssistant !== undefined) {
+								currentQueryMessageIds.push(currentAssistant.id);
+							}
+						}
+					} catch {
+						// No confirmed host ids: retain all internal evidence.
+					}
+				}
 				let rerankSkipped = "";
 				const results = await unifiedSearch(
 					deps.db,
@@ -310,8 +378,14 @@ export function createCtxSearchTool(
 						},
 						isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
 						maxMessageOrdinal: messageOrdinalCutoff,
+						currentQueryMessageIds,
 						gitCommitsEnabled,
-						sources: overrides?.sources ?? normalizeSources(params.sources),
+						// One process-global user-level corpus; project identity never enters it.
+						wiki: deps.wiki,
+						wikiQuery: rawQuery,
+						sources: overrides?.sources ?? normalizedSources,
+						wikiFallback,
+						memoryGateOnly: overrides?.memoryGateOnly === true,
 						visibleMemoryIds,
 						diagnostics,
 						gitRepositoryAvailable: directoryHasGitMetadata(ctx.cwd),
@@ -319,7 +393,9 @@ export function createCtxSearchTool(
 						explicitSearch: true,
 						// Reserved candidates feed the deterministic post-model appendix
 						// on the fusion route only; plain classic calls never collect them.
-						...(collectReserved ? { collectReservedCandidates: collectReserved } : {}),
+						...(collectReserved
+							? { collectReservedCandidates: collectReserved }
+							: {}),
 						rerankConnectionFile: deps.rerankConnectionFile,
 						rerankConfig: deps.rerankConfig,
 						// Cancellation also stops history-chunk pool building.
@@ -330,11 +406,24 @@ export function createCtxSearchTool(
 						...dateRange,
 					},
 				);
+				const textResults = overrides?.memoryGateOnly
+					? results.filter((result) => result.source !== "memory")
+					: results;
+				const textDiagnostics = overrides?.memoryGateOnly
+					? {
+							...diagnostics,
+							suppressedVisibleMemoryIds: [],
+						}
+					: diagnostics;
 				return {
 					ok: true as const,
 					text:
-						formatSearchResults(query, results, sessionId, diagnostics) +
-						(rerankSkipped ? `\n${rerankSkipped}` : ""),
+						formatSearchResults(
+							query,
+							textResults,
+							sessionId,
+							textDiagnostics,
+						) + (rerankSkipped ? `\n${rerankSkipped}` : ""),
 					results,
 					diagnostics,
 				};
@@ -373,15 +462,27 @@ export function createCtxSearchTool(
 							const classic = await runClassic({ sources: ["memory"] });
 							return wrap(classic.text, !classic.ok);
 						}
-						// Fusion runs classic once without memory, for the transient
-						// materials; a miss, or a failure with the status document itself
-						// readable, reuses that exact result. A status the cache cannot
+						// Explicit fusion runs its selected non-memory sources once. A default
+						// query includes memory in the internal wiki gate; it is removed before
+						// result ranking/limit and material. A miss, or a failure with readable
+						// status, reuses that exact result. A status the cache cannot
 						// carry at all fails the query to the FULL classic search instead —
 						// memories included (see below).
 						let reservedCandidates: ReservedSearchCandidates | undefined;
+						// Wiki joins only the default pre-run when user-level config enables
+						// it. Explicit arrays keep their non-memory filtering and direct routing.
+						const fusionSources: Array<
+							"memory" | "git_commit" | "primer" | "note" | "message" | "wiki"
+						> = ["memory", "git_commit", "primer", "note", "message"];
+						if (deps.wiki?.enabled) fusionSources.push("wiki");
+						const wikiFallback = params.sources === undefined;
 						const classic = await runClassic(
 							{
-								sources: params.sources?.filter((source) => source !== "memory") ?? ["git_commit", "primer", "note", "message"],
+								sources:
+									params.sources?.filter((source) => source !== "memory") ??
+									fusionSources,
+								wikiFallback,
+								memoryGateOnly: params.sources === undefined,
 							},
 							(candidates) => {
 								reservedCandidates = candidates;
@@ -396,13 +497,18 @@ export function createCtxSearchTool(
 								query,
 								results: classic.results,
 								budgetTokens: connection.transientBudgetTokens,
+								prioritizeWikiFallback: wikiFallback,
 								reservedCandidates,
 							});
 						} catch (error) {
-							const reason = (error instanceof Error ? error.message : String(error))
-								.replace(/[\r\n]+/g, " ");
+							const reason = (
+								error instanceof Error ? error.message : String(error)
+							).replace(/[\r\n]+/g, " ");
 							log(`[ctx_search] transient-material fallback: ${reason}`);
-							if (hasUnsafeStrataCache(connection.prefixPath) || !readStrataStatusDocument(connection).ok) {
+							if (
+								hasUnsafeStrataCache(connection.prefixPath) ||
+								!readStrataStatusDocument(connection).ok
+							) {
 								const full = await runClassic();
 								return wrap(full.text, !full.ok);
 							}
@@ -424,18 +530,45 @@ export function createCtxSearchTool(
 							allowExternalRefs: true,
 						});
 						if (answer.status === "answered") {
-							const base = params.sources ? mixedSourcesAnswer(answer.text) : answer.text;
-							return wrap(withReservedAppendix(base, reserved, query));
+							const base = params.sources
+								? mixedSourcesAnswer(answer.text)
+								: answer.text;
+							const wikiDiagnostics = formatWikiSearchDiagnostics(
+								classic.diagnostics,
+							);
+							const answerWithDiagnostics = wikiDiagnostics
+								? `${base}\n\n${wikiDiagnostics}`
+								: base;
+							return wrap(
+								withReservedAppendix(
+									answerWithDiagnostics,
+									reserved,
+									query,
+									material?.wikiSections ?? [],
+								),
+							);
 						}
-						// The pre-run never searched memories and is not authoritative
-						// without the ledger's changes, so an unavailable status means
-						// full classic retrieval — memories included — answers this query.
-						if (answer.status === "failed" && ["status_unavailable", "http_409", "http_400"].includes(answer.reason)) {
+						// The pre-run is not the full classic answer and is not authoritative
+						// without the ledger's changes, so an unavailable status falls back
+						// to full classic retrieval.
+						if (
+							answer.status === "failed" &&
+							["status_unavailable", "http_409", "http_400"].includes(
+								answer.reason,
+							)
+						) {
 							const full = await runClassic();
 							return wrap(full.text, !full.ok);
 						}
 						if (answer.status === "miss") {
-							return wrap(withReservedAppendix(classic.text, reserved, query));
+							return wrap(
+								withReservedAppendix(
+									classic.text,
+									reserved,
+									query,
+									material?.wikiSections ?? [],
+								),
+							);
 						}
 						return wrap(classic.text);
 					}

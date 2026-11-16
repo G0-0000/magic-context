@@ -3,8 +3,10 @@ import type { ImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 
 /** Sources the agent can narrow ctx_search to. Facts are intentionally NOT a
  *  source — they're always rendered in <session-history> in message[0], so
- *  searching them returns content already visible in context. */
-export type CtxSearchSource = "memory" | "message" | "git_commit" | "primer" | "note";
+ *  searching them returns content already visible in context. `wiki` is the
+ *  user-level global Markdown corpus and exists only when its user config
+ *  enables it. */
+export type CtxSearchSource = "memory" | "message" | "git_commit" | "primer" | "note" | "wiki";
 
 export interface CtxSearchArgs extends ImitatedReducedArgs {
     query?: string;
@@ -27,6 +29,12 @@ export interface CtxSearchToolDeps {
     resolveProjectPath: (directory: string) => string | undefined;
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
+    /**
+     * User-level global wiki corpus. Every project shares the same root; a
+     * project config cannot enable, disable, or redirect it. Omitted keeps the
+     * source off and never loads the native search SDK.
+     */
+    wiki?: import("../../config/schema/magic-context").WikiConfig;
     /** When true, ctx_search surfaces indexed git commits as a 3rd source. */
     gitCommitsEnabled?: boolean;
     rerankConnectionFile?: string;
@@ -36,14 +44,14 @@ export interface CtxSearchToolDeps {
      * the project has not opted in or the user connection is incomplete.
      * Omitted means the cache path is off (tests and hosts that have not wired it).
      */
-    resolveStrataAsk?: (
-        directory: string,
-    ) => import("./strata-ask").StrataAskConnection | null;
+    resolveStrataAsk?: (directory: string) => import("./strata-ask").StrataAskConnection | null;
     /** Override message reader for testing (avoids opening OpenCode DB in CI). */
     readMessages?: (sessionId: string) => Array<{
         ordinal: number;
         id: string;
         role: string;
         parts: unknown[];
+        /** OpenCode 2 host row type; absent on OpenCode 1. */
+        storeType?: string;
     }>;
 }

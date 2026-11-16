@@ -3,6 +3,7 @@ import type {
     UnifiedSearchResult,
 } from "../../features/magic-context/search";
 import { truncateUtf8 } from "../../features/magic-context/search-rerank";
+import { WIKI_SECTION_MAX_CHARS } from "../../features/magic-context/wiki-section";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { matchedSearchSnippet } from "../../shared/search-text";
 import type { Database } from "../../shared/sqlite";
@@ -35,6 +36,13 @@ export interface ReservedHits {
     gitCommits: ReservedGitHit[];
 }
 
+export interface WikiSectionCitation {
+    path: string;
+    startLine: number;
+    endLine: number;
+    heading: string | null;
+}
+
 export interface TransientMaterial {
     text: string;
     included: number;
@@ -43,15 +51,33 @@ export interface TransientMaterial {
      *  renders from these alone, so a guaranteed hit never depends on the
      *  model citing it. */
     reserved: ReservedHits;
+    /** Section-enriched wiki lines actually selected into `text`. */
+    wikiSections: WikiSectionCitation[];
 }
 
 type NonMemoryResult = Exclude<UnifiedSearchResult, { source: "memory" }>;
 type MessageResult = Extract<NonMemoryResult, { source: "message" }>;
-type MaterialLine = { header: string; body: string; clipped: boolean };
+type MaterialAnchor = {
+    text: string;
+    caseSensitive: boolean;
+};
+type AnchorRange = { start: number; end: number };
+type MaterialLine = {
+    header: string;
+    body: string;
+    clipped: boolean;
+    anchors?: readonly MaterialAnchor[];
+    anchorRange?: AnchorRange | null;
+    byteCap?: number;
+    omit?: boolean;
+};
 
 const MAX_ITEMS = 8;
+const MAX_WIKI_LINES = 3;
 const FULL_TEXT_CHARS = 700;
 const FULL_TEXT_BYTES = 1024;
+const WIKI_SECTION_BYTES = 64 * 1024;
+const WIKI_HEADER_BYTES = 512;
 const MESSAGE_CHARS = 300;
 const RESERVED_MESSAGE_LIMIT = 3;
 const RESERVED_GIT_LIMIT = 3;
@@ -77,12 +103,21 @@ function singleLine(text: string): string {
     return text.replace(/\s+/g, " ").trim();
 }
 
+/** Ordinary paths stay readable; whitespace/control/quote/backslash paths use reversible JSON escaping. */
+function wikiPath(text: string): string {
+    for (const char of text) {
+        const code = char.codePointAt(0) ?? 0;
+        if (/\s/.test(char) || char === '"' || char === "\\" || code <= 0x1f || code === 0x7f) {
+            return JSON.stringify(text);
+        }
+    }
+    return text;
+}
+
 function capped(text: string, chars: number, bytes?: number): { text: string; clipped: boolean } {
     const points = Array.from(singleLine(text));
     let clipped = points.length > chars;
-    let result = clipped
-        ? `${points.slice(0, Math.max(0, chars - 1)).join("")}…`
-        : points.join("");
+    let result = clipped ? `${points.slice(0, Math.max(0, chars - 1)).join("")}…` : points.join("");
     if (bytes !== undefined && Buffer.byteLength(result, "utf8") > bytes) {
         result = `${truncateUtf8(result, bytes - Buffer.byteLength("…"))}…`;
         clipped = true;
@@ -94,6 +129,11 @@ function date(ms: number | null | undefined): string {
     if (typeof ms !== "number" || !Number.isFinite(ms)) return "?";
     const value = new Date(ms);
     return Number.isNaN(value.getTime()) ? "?" : value.toISOString();
+}
+
+function boundedWikiHeader(text: string): string {
+    if (Buffer.byteLength(text, "utf8") <= WIKI_HEADER_BYTES) return text;
+    return `${truncateUtf8(text, WIKI_HEADER_BYTES - Buffer.byteLength("…", "utf8"))}…`;
 }
 
 function messageTimes(
@@ -119,12 +159,95 @@ function messageTimes(
     return new Map(rows.map((row) => [row.message_ordinal, row.message_time_ms]));
 }
 
-function fullTextLine(header: string, text: string): MaterialLine {
-    // Like candidateText, the complete document (metadata and body) is capped
-    // at 1 KiB. The 700-character source cap still applies independently.
-    const bodyBytes = Math.max(3, FULL_TEXT_BYTES - Buffer.byteLength(header) - 4);
-    const body = capped(text, FULL_TEXT_CHARS, bodyBytes);
-    return { header, body: body.text, clipped: body.clipped };
+function cappedAroundAnchor(
+    text: string,
+    chars: number,
+    bytes: number,
+    anchors: readonly MaterialAnchor[],
+    cachedRange?: AnchorRange | null,
+): { text: string; clipped: boolean; anchorRange: AnchorRange | null } {
+    const normalized = singleLine(text);
+    const points = Array.from(normalized);
+    const locate = (anchor: MaterialAnchor): AnchorRange | null => {
+        const normalizedAnchor = singleLine(anchor.text);
+        const anchorPoints = Array.from(normalizedAnchor);
+        if (anchorPoints.length === 0) return null;
+        for (let start = 0; start <= points.length - anchorPoints.length; start++) {
+            const candidate = points.slice(start, start + anchorPoints.length).join("");
+            if (
+                anchor.caseSensitive
+                    ? candidate === normalizedAnchor
+                    : candidate.toLowerCase() === normalizedAnchor.toLowerCase()
+            ) {
+                return { start, end: start + anchorPoints.length };
+            }
+        }
+        return null;
+    };
+    const ranges =
+        cachedRange !== undefined
+            ? cachedRange
+                ? [cachedRange]
+                : []
+            : anchors.map(locate).filter((range): range is AnchorRange => range !== null);
+    for (const range of ranges) {
+        const anchorLength = Math.max(1, range.end - range.start);
+        for (
+            let contentLimit = Math.min(chars, points.length);
+            contentLimit >= anchorLength;
+            contentLimit--
+        ) {
+            let start = Math.max(0, range.start - Math.floor((contentLimit - anchorLength) / 2));
+            let end = Math.min(points.length, start + contentLimit);
+            if (end < range.end) {
+                end = range.end;
+                start = Math.max(0, end - contentLimit);
+            }
+            if (start > range.start) start = range.start;
+            const candidate = `${start > 0 ? "…" : ""}${points.slice(start, end).join("")}${end < points.length ? "…" : ""}`;
+            if (
+                Array.from(candidate).length <= chars &&
+                Buffer.byteLength(candidate, "utf8") <= bytes
+            ) {
+                const prefix = start > 0 ? 1 : 0;
+                return {
+                    text: candidate,
+                    clipped: candidate !== text,
+                    anchorRange: {
+                        start: prefix + range.start - start,
+                        end: prefix + range.end - start,
+                    },
+                };
+            }
+        }
+    }
+    return { ...capped(text, chars, bytes), anchorRange: null };
+}
+
+function fullTextLine(
+    header: string,
+    text: string,
+    anchors?: readonly MaterialAnchor[],
+    caps: { chars: number; bytes: number } = {
+        chars: FULL_TEXT_CHARS,
+        bytes: FULL_TEXT_BYTES,
+    },
+): MaterialLine {
+    // Ordinary sources retain their 700-character/1-KiB document cap. A
+    // section-enriched wiki hit raises only this per-line safety ceiling; the
+    // existing total transient token budget still allocates the final body.
+    const bodyBytes = Math.max(3, caps.bytes - Buffer.byteLength(header) - 4);
+    const body: { text: string; clipped: boolean; anchorRange?: AnchorRange | null } =
+        anchors?.length
+            ? cappedAroundAnchor(text, caps.chars, bodyBytes, anchors)
+            : capped(text, caps.chars, bodyBytes);
+    return {
+        header,
+        body: body.text,
+        clipped: body.clipped,
+        ...(anchors?.length ? { anchors, anchorRange: body.anchorRange } : {}),
+        byteCap: caps.bytes,
+    };
 }
 
 /**
@@ -178,9 +301,15 @@ function materialLine(
             const row = db.prepare("SELECT message FROM git_commits WHERE sha=?").get(hit.sha) as
                 | { message: string }
                 | undefined;
+            const message = row?.message ?? hit.content;
+            const excerpt = matchedSearchSnippet(message, query, FULL_TEXT_CHARS) || message;
+            const anchors = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].map(
+                (text) => ({ text, caseSensitive: false }),
+            );
             return fullTextLine(
                 `[git_commit] ${hit.shortSha} time=${date(hit.committedAtMs)}`,
-                row?.message ?? hit.content,
+                excerpt,
+                anchors,
             );
         }
         case "primer": {
@@ -216,6 +345,32 @@ function materialLine(
                 body: "",
                 clipped: false,
             };
+        case "wiki": {
+            const hasSection =
+                hit.sectionStartLine !== undefined && hit.sectionEndLine !== undefined;
+            const location = hasSection
+                ? `${hit.sectionStartLine}-${hit.sectionEndLine} heading=${singleLine(hit.heading ?? "")}`
+                : `${hit.line}`;
+            const header = `[wiki] path=${wikiPath(hit.path)}:${location}`;
+            // Only section citations require a complete locator. Explicit
+            // non-section snippets retain their original bounded-header shape.
+            if (hasSection && Buffer.byteLength(header, "utf8") + 4 > WIKI_SECTION_BYTES) {
+                return { header, body: "", clipped: true, omit: true };
+            }
+            const caseSensitive = query !== query.toLowerCase();
+            return fullTextLine(
+                hasSection ? header : boundedWikiHeader(header),
+                hit.snippet || hit.content,
+                [
+                    ...(hit.matchText ? [{ text: hit.matchText, caseSensitive: true }] : []),
+                    { text: hit.content, caseSensitive },
+                    { text: query, caseSensitive },
+                ],
+                hasSection
+                    ? { chars: WIKI_SECTION_MAX_CHARS, bytes: WIKI_SECTION_BYTES }
+                    : undefined,
+            );
+        }
     }
 }
 
@@ -288,7 +443,10 @@ function reservedGitLine(hit: ReservedGitHit): string {
  */
 export function renderReservedAppendix(
     reserved: ReservedHits,
-    options?: { dateIntent?: boolean },
+    options?: {
+        dateIntent?: boolean;
+        wikiSections?: readonly WikiSectionCitation[];
+    },
 ): string {
     const messageLines = reserved.messages
         .slice(0, RESERVED_MESSAGE_LIMIT)
@@ -297,8 +455,18 @@ export function renderReservedAppendix(
     const lines = options?.dateIntent
         ? [...gitLines, ...messageLines]
         : [...messageLines, ...gitLines];
-    if (lines.length === 0) return "";
-    return [RESERVED_APPENDIX_HEADER, ...lines].join("\n");
+    const wikiLines = (options?.wikiSections ?? [])
+        .slice(0, MAX_WIKI_LINES)
+        .map(
+            (section) =>
+                `- [wiki] ${wikiPath(section.path)}:${section.startLine}-${section.endLine} 《${singleLine(section.heading ?? "")}》`,
+        );
+    if (lines.length === 0 && wikiLines.length === 0) return "";
+    return [
+        RESERVED_APPENDIX_HEADER,
+        ...lines,
+        ...(wikiLines.length > 0 ? ["Wiki 小节：", ...wikiLines] : []),
+    ].join("\n");
 }
 
 /**
@@ -311,8 +479,12 @@ export function withReservedAppendix(
     text: string,
     reserved: ReservedHits,
     query: string,
+    wikiSections: readonly WikiSectionCitation[] = [],
 ): string {
-    const appendix = renderReservedAppendix(reserved, { dateIntent: detectDateIntent(query) });
+    const appendix = renderReservedAppendix(reserved, {
+        dateIntent: detectDateIntent(query),
+        wikiSections,
+    });
     return appendix === "" ? text : `${text}\n\n${appendix}`;
 }
 
@@ -324,7 +496,20 @@ function render(line: MaterialLine, chars: number): string {
     if (!line.body || chars <= 0) return line.header;
     const points = Array.from(line.body);
     const body =
-        chars < points.length ? `${points.slice(0, Math.max(0, chars - 1)).join("")}…` : line.body;
+        chars < points.length
+            ? line.anchors?.length
+                ? cappedAroundAnchor(
+                      line.body,
+                      chars,
+                      Math.max(
+                          3,
+                          (line.byteCap ?? FULL_TEXT_BYTES) - Buffer.byteLength(line.header) - 4,
+                      ),
+                      line.anchors,
+                      line.anchorRange,
+                  ).text
+                : `${points.slice(0, Math.max(0, chars - 1)).join("")}…`
+            : line.body;
     return `${line.header} :: ${body}`;
 }
 
@@ -335,10 +520,19 @@ export function buildTransientMaterial(args: {
     query: string;
     results: readonly UnifiedSearchResult[];
     budgetTokens: number;
+    /** Prioritize wiki snippets on the default fallback route, including read failures. */
+    prioritizeWikiFallback?: boolean;
     /** Explicit-fusion-only reserved candidates (search.ts channel). */
     reservedCandidates?: ReservedSearchCandidates;
 }): TransientMaterial | null {
-    let hits = args.results.filter((hit): hit is NonMemoryResult => hit.source !== "memory");
+    let wikiCount = 0;
+    let hits = args.results
+        .filter((hit): hit is NonMemoryResult => hit.source !== "memory")
+        .filter((hit) => {
+            if (hit.source !== "wiki") return true;
+            wikiCount++;
+            return wikiCount <= MAX_WIKI_LINES;
+        });
     if (hits.length === 0) return null;
     // A relative-date query ("昨天", "last week") asks about a point in time:
     // commits are the most date-anchored source, so they take the
@@ -354,24 +548,18 @@ export function buildTransientMaterial(args: {
         ? Math.max(0, Math.floor(args.budgetTokens))
         : 0;
     const times = messageTimes(args.db, args.sessionId, hits);
-    const lines = hits.map((hit) => materialLine(args.db, args.sessionId, args.query, hit, times));
+    const presentable = hits
+        .map((hit) => ({
+            hit,
+            line: materialLine(args.db, args.sessionId, args.query, hit, times),
+        }))
+        .filter(({ line }) => line.omit !== true);
+    hits = presentable.map(({ hit }) => hit);
+    const lines = presentable.map(({ line }) => line);
+    if (hits.length === 0) return null;
     const selected = new Map<number, { text: string; cost: number; clipped: boolean }>();
     const seen = new Set<NonMemoryResult["source"]>();
     let used = 0;
-
-    // Reserve the first hit of each source before later hits. At normal budgets
-    // (1000 tokens), each source has a floor; for tiny budgets the hard token
-    // limit wins even if a minimal metadata line cannot fit.
-    for (let i = 0; i < hits.length; i++) {
-        const hit = hits[i]!;
-        if (seen.has(hit.source)) continue;
-        seen.add(hit.source);
-        const text = lines[i]!.header;
-        const cost = price(text);
-        if (used + cost > budget) continue;
-        selected.set(i, { text, cost, clipped: !!lines[i]!.body || lines[i]!.clipped });
-        used += cost;
-    }
 
     const fill = (index: number, availableBudget = budget): void => {
         const line = lines[index]!;
@@ -400,12 +588,52 @@ export function buildTransientMaterial(args: {
         });
     };
 
+    // Prioritize fallback wiki bodies before other source headers, including
+    // native snippets when a section could not be read. Explicit wiki snippets
+    // retain ordinary allocation; resolved sections are identified by metadata.
+    // MAX_WIKI_LINES and MAX_ITEMS still bound the result.
+    const priorityWikiIndices: number[] = [];
+    for (let i = 0; i < hits.length; i++) {
+        const hit = hits[i]!;
+        if (hit.source !== "wiki") continue;
+        if (hit.sectionStartLine === undefined && args.prioritizeWikiFallback !== true) continue;
+        priorityWikiIndices.push(i);
+    }
+    for (const index of priorityWikiIndices) {
+        const line = lines[index]!;
+        const cost = price(line.header);
+        if (used + cost > budget) continue;
+        selected.set(index, { text: line.header, cost, clipped: !!line.body || line.clipped });
+        used += cost;
+        fill(index);
+    }
+    if (priorityWikiIndices.some((index) => selected.has(index))) seen.add("wiki");
+
+    // Reserve the first hit of each source before later hits. At normal budgets
+    // (1000 tokens), each source has a floor; for tiny budgets the hard token
+    // limit wins even if a minimal metadata line cannot fit.
+    for (let i = 0; i < hits.length; i++) {
+        const hit = hits[i]!;
+        if (selected.has(i)) continue;
+        if (seen.has(hit.source)) continue;
+        seen.add(hit.source);
+        const text = lines[i]!.header;
+        const cost = price(text);
+        if (used + cost > budget) continue;
+        selected.set(i, { text, cost, clipped: !!lines[i]!.body || lines[i]!.clipped });
+        used += cost;
+    }
+
     for (const index of selected.keys()) fill(index);
+    const selectedSources = new Set<NonMemoryResult["source"]>();
+    for (const index of selected.keys()) selectedSources.add(hits[index]!.source);
     for (let i = 0; i < hits.length && selected.size < MAX_ITEMS; i++) {
         if (selected.has(i)) continue;
-        // A first hit that could not fit must not be replaced by a later hit.
-        const first = hits.findIndex((hit) => hit.source === hits[i]!.source);
-        if (!selected.has(first)) continue;
+        // A source without a reserved slot must not be represented by a later hit
+        // (it did not fit). The wiki prepass can make a non-first index the
+        // source's representative, so ask which sources hold a slot, not which
+        // hits came first.
+        if (!selectedSources.has(hits[i]!.source)) continue;
         const text = lines[i]!.header;
         const cost = price(text);
         if (used + cost > budget) break;
@@ -420,18 +648,27 @@ export function buildTransientMaterial(args: {
         const candidate = `另有 ${omitted} 条未纳入`;
         const noticeCost = price(candidate);
         const minimum = [...selected.keys()].reduce(
-            (total, index) => total + price(lines[index]!.header),
+            (total, index) =>
+                total +
+                (priorityWikiIndices.includes(index)
+                    ? selected.get(index)!.cost
+                    : price(lines[index]!.header)),
             0,
         );
         if (minimum + noticeCost <= budget) {
-            // Make room for the omission count without evicting a source's first hit.
+            // Preserve prioritized wiki bodies while making room for the notice.
             for (const index of [...selected.keys()].sort((a, b) => b - a)) {
                 if (used + noticeCost <= budget) break;
+                if (priorityWikiIndices.includes(index)) continue;
                 const previous = selected.get(index)!;
                 const line = lines[index]!;
                 const cost = price(line.header);
                 used += cost - previous.cost;
-                selected.set(index, { text: line.header, cost, clipped: !!line.body || line.clipped });
+                selected.set(index, {
+                    text: line.header,
+                    cost,
+                    clipped: !!line.body || line.clipped,
+                });
                 if (used + noticeCost <= budget) fill(index, budget - noticeCost);
             }
             notice = candidate;
@@ -440,10 +677,29 @@ export function buildTransientMaterial(args: {
     const ordered = [...selected.entries()].sort(([a], [b]) => a - b);
     const output = ordered.map(([, line]) => line.text);
     if (notice) output.push(notice);
+    const wikiSections = ordered.flatMap(([index]): WikiSectionCitation[] => {
+        const hit = hits[index]!;
+        if (
+            hit.source !== "wiki" ||
+            hit.sectionStartLine === undefined ||
+            hit.sectionEndLine === undefined
+        ) {
+            return [];
+        }
+        return [
+            {
+                path: hit.path,
+                startLine: hit.sectionStartLine,
+                endLine: hit.sectionEndLine,
+                heading: hit.heading ?? null,
+            },
+        ];
+    });
     return {
         text: output.join("\n"),
         included: ordered.length,
         truncated: omitted > 0 || ordered.some(([, line]) => line.clipped),
         reserved,
+        wikiSections,
     };
 }

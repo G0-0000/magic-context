@@ -15,5 +15,6 @@ Sources (omit for all):
 - git_commit — commit history; "when did this change" (pair with message for regression hunts)
 - primer — reusable project Q&A the dreamer distils from recurring questions; "have we answered this before"
 - note — parked follow-ups with their recorded text; "did we leave a follow-up"
+- wiki — global read-only Markdown corpus; literal content matches with path and line, when enabled in user config
 Use from/to to restrict every source to an inclusive UTC date range.`;
 export const DEFAULT_CTX_SEARCH_LIMIT = 10;
