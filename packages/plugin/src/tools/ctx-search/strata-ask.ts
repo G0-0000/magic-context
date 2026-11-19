@@ -808,7 +808,6 @@ function outcomeOf(
         /(?:第[一二三四五六七八九十百零两0-9０-９]+条记忆|记忆摘要|记忆列表|记忆依据|依据记忆)\s*[:：]/u.test(
             reply.answer,
         ) ||
-        /[#＃]\s*[0-9０-９]+/u.test(reply.answer) ||
         /<\s*\/?\s*(?:table|tr|th|td)(?=[\s/>])/iu.test(reply.answer) ||
         /(?:^|\n)\s*\|[^\n]*\|/u.test(reply.answer) ||
         /(?:^|\n)[^\n]*\|[^\n]*\n\s*\|?\s*:?-{3,}/u.test(reply.answer) ||

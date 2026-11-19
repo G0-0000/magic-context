@@ -737,8 +737,6 @@ describe("tryStrataAsk", () => {
             JSON.stringify({ answer: "记忆库中无", memoryIds: [], externalRefs: ["note:1"] }),
             JSON.stringify({ answer: " 记忆库中无 ", memoryIds: [] }),
             JSON.stringify({ answer: "结论\n#999：编造的记忆摘要", memoryIds: [] }),
-            JSON.stringify({ answer: "结论依据 #999", memoryIds: [] }),
-            JSON.stringify({ answer: "结论依据 ＃９９９", memoryIds: [] }),
             JSON.stringify({ answer: "结论\r另一行", memoryIds: [] }),
             JSON.stringify({ answer: "\n结论\n", memoryIds: [] }),
             JSON.stringify({ answer: "\r结论", memoryIds: [] }),
@@ -786,6 +784,13 @@ describe("tryStrataAsk", () => {
             text: `答案：\n${boundaryAnswer}\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
         });
         for (const answer of ["😀".repeat(51), "😀".repeat(200)]) {
+            content = JSON.stringify({ answer, memoryIds: [] });
+            expect(await tryStrataAskDetailed(args)).toEqual({
+                status: "answered",
+                text: `答案：\n${answer}\n\n依据记忆：\n无可核验的记忆依据\n${STRATA_ASK_FOOTER}`,
+            });
+        }
+        for (const answer of ["相关调研记录在 #999。", "上游 PR #1271 与 Issue #1480 已登记。"]) {
             content = JSON.stringify({ answer, memoryIds: [] });
             expect(await tryStrataAskDetailed(args)).toEqual({
                 status: "answered",
@@ -841,6 +846,37 @@ describe("tryStrataAsk", () => {
             ).toEqual({
                 status: "answered",
                 text: `答案：\n${answer}\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #1231 | ${memoryContent} |\n${STRATA_ASK_FOOTER}`,
+            });
+            const summary = insertMemory(db, {
+                projectPath: "git:bound",
+                category: "RESEARCH",
+                content: "概要：相关调研记录在 #999。",
+            });
+            const linkedAnswer = "相关调研记录在 #999。";
+            const linkedFetch: typeof fetch = async () =>
+                Response.json({
+                    choices: [
+                        {
+                            message: {
+                                content: JSON.stringify({
+                                    answer: linkedAnswer,
+                                    memoryIds: [summary.id],
+                                }),
+                            },
+                        },
+                    ],
+                });
+            expect(
+                await tryStrataAskDetailed({
+                    query: "测试问题",
+                    config: connection("http://127.0.0.1:9", { prefixPath: temp.prefixPath }),
+                    fetchImpl: linkedFetch,
+                    statusDocument: null,
+                    db,
+                }),
+            ).toEqual({
+                status: "answered",
+                text: `答案：\n${linkedAnswer}\n\n依据记忆：\n| 记忆编号 | 记忆缩略 |\n| --- | --- |\n| #${summary.id} | 概要：相关调研记录在 #999。 |\n${STRATA_ASK_FOOTER}`,
             });
         } finally {
             closeQuietly(db);
